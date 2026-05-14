@@ -60,11 +60,11 @@ public interface ColorLockConfig extends Config
 	@ConfigItem(
 		keyName = "itemsUrl",
 		name = "Items JSON URL",
-		description = "/data/items.json or /api/items on deployed app — see DATA_CONTRACT.md"
+		description = "/data/items.json or /api/items on the deployed app (" + ColorLockWeb.ITEMS_PAGE + ")."
 	)
 	default String itemsUrl()
 	{
-		return "https://osrs-color-lock.vercel.app/data/items.json";
+		return ColorLockWeb.DEFAULT_ITEMS_JSON;
 	}
 
 	@ConfigItem(
@@ -135,5 +135,25 @@ public interface ColorLockConfig extends Config
 	default boolean enableLookupPanel()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "lookupMyPaletteOnly",
+		name = "Lookup: palette filter",
+		description = "When toggled from the Lookup panel checkbox, searches only items your color lock can use (crew rules apply)."
+	)
+	default boolean lookupMyPaletteOnly()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "lookupAllColorsRowsOnly",
+		name = "Lookup: hub opt-out rows only",
+		description = "When toggled from the Lookup panel, searches only hub opt-out listings (shown as \"All colors\")."
+	)
+	default boolean lookupAllColorsRowsOnly()
+	{
+		return false;
 	}
 }

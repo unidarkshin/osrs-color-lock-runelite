@@ -1,6 +1,7 @@
 package com.osrscolorlock.colorlock;
 
 import com.google.gson.Gson;
+import com.google.gson.annotations.SerializedName;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -11,6 +12,12 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -31,6 +38,11 @@ public class ColorLockGroupSync
 
 	private volatile boolean resolvedOk;
 	private volatile ColorLockColor resolvedLock;
+	/**
+	 * When non-null while {@link #resolvedOk}, item rules use intersect(manifest usableColors, this set).
+	 * Null ⇒ no intersect (use manifest only).
+	 */
+	private volatile Set<String> resolvedCrewIntersectColors;
 
 	@Inject
 	public ColorLockGroupSync(ClientThread clientThread)
@@ -55,6 +67,19 @@ public class ColorLockGroupSync
 		return resolvedLock;
 	}
 
+	/**
+	 * Non-null and non-empty set only when crew sync succeeded and hub sent {@code group.enabledColors}.
+	 * Passed to manifest rule intersection; otherwise {@code null}.
+	 */
+	Set<String> manifestRuleCrewFilter(ColorLockConfig config)
+	{
+		if (!config.syncGroupAssignmentFromWeb() || !resolvedOk)
+		{
+			return null;
+		}
+		return resolvedCrewIntersectColors;
+	}
+
 	void refreshAsync(ColorLockConfig config, Runnable onFinishClientThread)
 	{
 		new Thread(() -> {
@@ -69,6 +94,7 @@ public class ColorLockGroupSync
 		{
 			resolvedOk = false;
 			resolvedLock = null;
+			resolvedCrewIntersectColors = null;
 			return;
 		}
 		String slug = config.groupSlug() == null ? "" : config.groupSlug().trim();
@@ -79,6 +105,7 @@ public class ColorLockGroupSync
 			log.warning("Group sync skipped: set Items JSON URL + group slug + member code");
 			resolvedOk = false;
 			resolvedLock = null;
+			resolvedCrewIntersectColors = null;
 			return;
 		}
 
@@ -89,9 +116,12 @@ public class ColorLockGroupSync
 			String uri = base + "/api/groups/" + encodedSlug + "/plugin-resolve";
 			HttpURLConnection conn = (HttpURLConnection) URI.create(uri).toURL().openConnection();
 			conn.setRequestMethod("POST");
+			conn.setUseCaches(false);
 			conn.setConnectTimeout(20_000);
 			conn.setReadTimeout(120_000);
 			conn.setDoOutput(true);
+			conn.setRequestProperty("Cache-Control", "no-cache");
+			conn.setRequestProperty("Pragma", "no-cache");
 			conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
 			conn.setRequestProperty("Accept", "application/json");
 			conn.setRequestProperty("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)");
@@ -122,6 +152,7 @@ public class ColorLockGroupSync
 			{
 				resolvedOk = false;
 				resolvedLock = null;
+				resolvedCrewIntersectColors = null;
 				log.warning("plugin-resolve HTTP " + rc + " for group slug " + slug);
 				conn.disconnect();
 				return;
@@ -140,6 +171,7 @@ public class ColorLockGroupSync
 					resolvedLock = null;
 				}
 				resolvedOk = true;
+				resolvedCrewIntersectColors = deriveCrewIntersectColors(resp != null ? resp.group : null);
 				if (resolvedLock != null)
 				{
 					log.info(() -> "Group sync OK: server assignedColor=" + resolvedLock.getKey());
@@ -147,6 +179,10 @@ public class ColorLockGroupSync
 				else
 				{
 					log.info("Group sync OK but server assignedColor is empty — using plugin \"Your color lock\" fallback");
+				}
+				if (resolvedCrewIntersectColors != null && !resolvedCrewIntersectColors.isEmpty())
+				{
+					log.fine(() -> "Group sync: enabledColors ∩ rules size=" + resolvedCrewIntersectColors.size());
 				}
 			}
 			finally
@@ -158,8 +194,49 @@ public class ColorLockGroupSync
 		{
 			resolvedOk = false;
 			resolvedLock = null;
+			resolvedCrewIntersectColors = null;
 			log.log(Level.WARNING, "group sync failed", e);
 		}
+	}
+
+	private static Set<String> deriveCrewIntersectColors(ResolveGroup group)
+	{
+		if (group == null || group.enabledColors == null || group.enabledColors.isEmpty())
+		{
+			return null;
+		}
+		LinkedHashSet<String> canon = new LinkedHashSet<>();
+		for (String c : group.enabledColors)
+		{
+			if (c == null)
+			{
+				continue;
+			}
+			String t = c.trim().toLowerCase(Locale.ENGLISH);
+			if (t.isEmpty())
+			{
+				continue;
+			}
+			canon.add(t);
+		}
+		if (canon.isEmpty())
+		{
+			return null;
+		}
+		HashSet<String> expanded = new HashSet<>(canon.size() + 4);
+		for (String t : canon)
+		{
+			expanded.add(t);
+			if ("purple".equals(t))
+			{
+				expanded.add("violet");
+			}
+			else if ("violet".equals(t))
+			{
+				expanded.add("purple");
+			}
+		}
+		return Collections.unmodifiableSet(expanded);
 	}
 
 	static final class ResolveBodyOnlyCode
@@ -187,6 +264,13 @@ public class ColorLockGroupSync
 	static final class ResolveResponse
 	{
 		ResolveMember member;
+		ResolveGroup group;
+	}
+
+	static final class ResolveGroup
+	{
+		@SerializedName(value = "enabledColors", alternate = {"enabled_colors"})
+		List<String> enabledColors;
 	}
 
 	static final class ResolveMember

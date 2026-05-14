@@ -44,7 +44,7 @@ public class ColorLockItemOverlay extends WidgetItemOverlay
 			return;
 		}
 		ManifestItem row = manifestStore.getListedManifestItem(itemId, itemManager);
-		if (row == null || row.getUsableColors().isEmpty())
+		if (row == null || row.getUsableColors().isEmpty() || !ManifestRules.isLockEnforced(row))
 		{
 			return;
 		}
@@ -64,7 +64,7 @@ public class ColorLockItemOverlay extends WidgetItemOverlay
 	private static void drawRestrictedCornerMark(Graphics2D g, Rectangle b)
 	{
 		int inset = Math.max(1, Math.min(b.width, b.height) / 14);
-		int arm = Math.max(6, Math.min(b.width, b.height) / 3);
+		int arm = Math.max(5, Math.min(b.width, b.height) / 4);
 		int x0 = b.x + b.width - arm - inset;
 		int y0 = b.y + inset;
 

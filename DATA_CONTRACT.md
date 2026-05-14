@@ -24,7 +24,9 @@ HTTP `GET` → **JSON array** of objects. Each object has (minimum for this plug
 | `healAmount` | int | \> 0 ⇒ food-ish for Eat |
 | `red` … `white` | number | Percentages; informational |
 | **`usableColors`** | string[] | One or more of: `red`, `yellow`, `green`, `blue`, `purple`, `brown`, `black`, `white` |
-| **`schemaVersion`** | int | Current value: **1** — increment in web repo when incompatible |
+| **`colorLockApplies`** | bool (optional) | **`false`** = do not gate. **`true`** = gate (when `usableColors` present). **Omitted** ⇒ treat as **gated**; the hub must set **`false`** on every opted-out row (potions, throwables, etc.). Aliases: `color_lock_applies`, `trackedByColorLock`, `colorLockTracked`, … |
+| **`colorLockExcluded`** | bool (optional) | When **`true`**, same as **`colorLockApplies: false`** (wins if both are present). Aliases: `color_lock_excluded`. |
+| **`schemaVersion`** | int | Current value: **2** (see `ITEMS_JSON_SCHEMA_VERSION` in web `colorLockItemsPayload.ts`) — increment together with plugin |
 
 Other fields (`stabAttack`, `tierLabel`, …) may be ignored.
 

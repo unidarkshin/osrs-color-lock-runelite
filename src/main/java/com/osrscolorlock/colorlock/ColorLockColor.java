@@ -9,9 +9,11 @@ public enum ColorLockColor
 	GREEN("green"),
 	BLUE("blue"),
 	PURPLE("purple"),
+	ORANGE("orange"),
 	BROWN("brown"),
 	BLACK("black"),
-	WHITE("white");
+	WHITE("white"),
+	PINK("pink");
 
 	private final String key;
 
@@ -27,7 +29,16 @@ public enum ColorLockColor
 
 	public boolean matchesPalette(String loweredUsableEntry)
 	{
-		return loweredUsableEntry != null && key.equals(loweredUsableEntry.trim().toLowerCase(Locale.ENGLISH));
+		if (loweredUsableEntry == null)
+		{
+			return false;
+		}
+		String t = loweredUsableEntry.trim().toLowerCase(Locale.ENGLISH);
+		if (key.equals(t))
+		{
+			return true;
+		}
+		return this == PURPLE && "violet".equals(t);
 	}
 
 	public static ColorLockColor fromPaletteKey(String paletteKey)
@@ -40,6 +51,10 @@ public enum ColorLockColor
 		for (ColorLockColor c : values())
 		{
 			if (c.key.equals(t))
+			{
+				return c;
+			}
+			if (c == PURPLE && "violet".equals(t))
 			{
 				return c;
 			}

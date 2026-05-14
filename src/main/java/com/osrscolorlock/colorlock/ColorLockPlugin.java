@@ -45,10 +45,23 @@ public class ColorLockPlugin extends Plugin
 {
 	private static final Logger log = Logger.getLogger(ColorLockPlugin.class.getName());
 
-	static final int EXPECTED_SCHEMA_VERSION = 1;
+	static final int EXPECTED_SCHEMA_VERSION = 2;
+
+	private void migrateLegacyItemsUrlIfNeeded()
+	{
+		if (!ColorLockWeb.shouldMigrateLegacyVercelItemsUrl(config.itemsUrl()))
+		{
+			return;
+		}
+		configManager.setConfiguration("colorlockhelper", "itemsUrl", ColorLockWeb.DEFAULT_ITEMS_JSON);
+		log.info("Updated Items JSON URL from legacy osrs-color-lock.vercel.app to " + ColorLockWeb.DEFAULT_ITEMS_JSON);
+	}
 
 	@Inject
 	private ColorLockConfig config;
+
+	@Inject
+	private ConfigManager configManager;
 
 	@Inject
 	private ManifestStore manifestStore;
@@ -94,6 +107,7 @@ public class ColorLockPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		migrateLegacyItemsUrlIfNeeded();
 		overlayManager.add(itemOverlay);
 		if (config.enableLookupPanel())
 		{
@@ -291,7 +305,7 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		ManifestItem row = manifestStore.getListedManifestItem(itemId, itemManager);
-		if (row == null || row.getUsableColors().isEmpty())
+		if (row == null || row.getUsableColors().isEmpty() || !ManifestRules.isLockEnforced(row))
 		{
 			return;
 		}
