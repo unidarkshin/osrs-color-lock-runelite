@@ -1,8 +1,7 @@
 package com.osrscolorlock.colorlock;
 
-import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.game.ItemManager;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -12,7 +11,6 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
@@ -24,7 +22,6 @@ public class ManifestStore
 	private static final Logger log = Logger.getLogger(ManifestStore.class.getName());
 
 	private final ClientThread clientThread;
-	private final Gson gson = new Gson();
 
 	private volatile Map<Integer, ManifestItem> byId = Collections.emptyMap();
 	private volatile int manifestSchemaVersion = -1;
@@ -51,21 +48,64 @@ public class ManifestStore
 		return byId.size();
 	}
 
-	public boolean isUsableByAssignment(int itemId, ColorLockColor assignment)
+	public ManifestItem getManifestItem(int itemId)
+	{
+		return byId.get(itemId);
+	}
+
+	/**
+	 * Row with non-empty usableColors for this id, or for {@link ItemManager#canonicalize(int)} when the
+	 * variant id is missing from the manifest (e.g. charged gear).
+	 */
+	public ManifestItem getListedManifestItem(int itemId, ItemManager itemManager)
 	{
 		ManifestItem row = byId.get(itemId);
-		if (row == null || row.getUsableColors().isEmpty())
+		if (hasListedColors(row))
 		{
-			return false;
+			return row;
 		}
-		for (String c : row.getUsableColors())
+		if (itemManager != null)
 		{
-			if (assignment.matchesPalette(c))
+			int canon = itemManager.canonicalize(itemId);
+			if (canon != itemId)
 			{
-				return true;
+				ManifestItem alt = byId.get(canon);
+				if (hasListedColors(alt))
+				{
+					return alt;
+				}
 			}
 		}
-		return false;
+		return row;
+	}
+
+	public boolean isUsableByAssignment(int itemId, ColorLockColor assignment)
+	{
+		return ManifestRules.isUsableByAssignment(byId.get(itemId), assignment);
+	}
+
+	/** True when manifest lists usableColors and your lock is not among them. Unknown items are not restricted. */
+	public boolean isRestrictedForAssignment(int itemId, ColorLockColor assignment)
+	{
+		return ManifestRules.isRestrictedForAssignment(byId.get(itemId), assignment);
+	}
+
+	/**
+	 * Like {@link #isRestrictedForAssignment(int, ColorLockColor)} but resolves manifest rows via
+	 * {@link #getListedManifestItem(int, ItemManager)} so variant ids match canonical entries.
+	 */
+	public boolean isRestrictedForAssignment(int itemId, ColorLockColor assignment, ItemManager itemManager)
+	{
+		if (itemManager == null)
+		{
+			return isRestrictedForAssignment(itemId, assignment);
+		}
+		return ManifestRules.isRestrictedForAssignment(getListedManifestItem(itemId, itemManager), assignment);
+	}
+
+	private static boolean hasListedColors(ManifestItem row)
+	{
+		return row != null && !row.getUsableColors().isEmpty();
 	}
 
 	public void downloadAsync(ColorLockConfig config, Runnable onClientThreadFinish)
@@ -94,23 +134,16 @@ public class ManifestStore
 
 		try (InputStreamReader reader = new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))
 		{
-			java.lang.reflect.Type listType = TypeToken.getParameterized(List.class, ManifestItem.class).getType();
-			List<ManifestItem> list = gson.fromJson(reader, listType);
-			if (list == null || list.isEmpty())
-			{
-				throw new IOException("manifest empty");
-			}
-			Map<Integer, ManifestItem> next = new HashMap<>(list.size() * 2);
+			List<ManifestItem> list = ManifestJson.readItems(reader);
 			Integer schemaSeen = null;
 			for (ManifestItem row : list)
 			{
-				next.put(row.getId(), row);
 				if (schemaSeen == null && row.getSchemaVersionNumber() >= 0)
 				{
 					schemaSeen = row.getSchemaVersionNumber();
 				}
 			}
-			byId = Collections.unmodifiableMap(next);
+			byId = ManifestJson.toUnmodifiableMap(list);
 			manifestSchemaVersion = schemaSeen == null ? -1 : schemaSeen;
 			log.info(() -> String.format(
 				"color-lock manifest loaded %d items schemaVersion=%s",

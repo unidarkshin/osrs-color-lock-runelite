@@ -7,12 +7,18 @@ import java.util.List;
 public class ManifestItem
 {
 	private int id;
+	private String name;
 	private Number schemaVersion;
 	private List<String> usableColors;
 
 	public int getId()
 	{
 		return id;
+	}
+
+	public String getName()
+	{
+		return name == null ? "" : name;
 	}
 
 	public List<String> getUsableColors()
