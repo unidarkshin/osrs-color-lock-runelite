@@ -20,13 +20,16 @@ public class ColorLockItemOverlay extends WidgetItemOverlay
 
 	private final ColorLockConfig config;
 	private final ManifestStore manifestStore;
+	private final ColorLockGroupSync groupSync;
 	private final ItemManager itemManager;
 
 	@Inject
-	ColorLockItemOverlay(ColorLockConfig config, ManifestStore manifestStore, ItemManager itemManager)
+	ColorLockItemOverlay(ColorLockConfig config, ManifestStore manifestStore, ColorLockGroupSync groupSync,
+		ItemManager itemManager)
 	{
 		this.config = config;
 		this.manifestStore = manifestStore;
+		this.groupSync = groupSync;
 		this.itemManager = itemManager;
 		showOnInventory();
 		showOnBank();
@@ -46,7 +49,8 @@ public class ColorLockItemOverlay extends WidgetItemOverlay
 			return;
 		}
 
-		boolean restricted = manifestStore.isRestrictedForAssignment(itemId, config.assignedColor(), itemManager);
+		ColorLockColor lock = groupSync.effectiveAssignment(config);
+		boolean restricted = manifestStore.isRestrictedForAssignment(itemId, lock, itemManager);
 
 		if (!restricted)
 		{

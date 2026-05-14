@@ -45,6 +45,7 @@ public class ColorLockLookupPanel extends PluginPanel
 	private final ManifestStore manifestStore;
 	private final ItemManager itemManager;
 	private final ColorLockConfig config;
+	private final ColorLockGroupSync groupSync;
 
 	private final JTextField queryField = new JTextField(18);
 	private final JButton searchButton = new JButton("Search");
@@ -56,13 +57,15 @@ public class ColorLockLookupPanel extends PluginPanel
 		ClientThread clientThread,
 		ManifestStore manifestStore,
 		ItemManager itemManager,
-		ColorLockConfig config)
+		ColorLockConfig config,
+		ColorLockGroupSync groupSync)
 	{
 		this.client = client;
 		this.clientThread = clientThread;
 		this.manifestStore = manifestStore;
 		this.itemManager = itemManager;
 		this.config = config;
+		this.groupSync = groupSync;
 
 		setLayout(new BorderLayout());
 		setPreferredSize(new Dimension(PluginPanel.PANEL_WIDTH, 420));
@@ -96,7 +99,7 @@ public class ColorLockLookupPanel extends PluginPanel
 	private void showPlaceholderIntro()
 	{
 		resultsPanel.removeAll();
-		JLabel intro = new JLabel("<html><body style='width:220px'>Type part of a name (at least 2 letters), then <b>Search</b>. Each row shows icon, name, and usable colors.</body></html>");
+		JLabel intro = new JLabel("<html><body style='width:220px'>Type part of a name (at least 2 letters), then <b>Search</b>. Each row shows the item icon, colored dots for usable palette colors (hover for names), and your lock color vs that item.</body></html>");
 		intro.setAlignmentX(Component.LEFT_ALIGNMENT);
 		resultsPanel.add(intro);
 		resultsPanel.revalidate();
@@ -197,39 +200,49 @@ public class ColorLockLookupPanel extends PluginPanel
 		textColumn.setOpaque(false);
 
 		String safeName = escapeHtml(hit.name);
-		String lockNote = "";
 		ManifestItem listed = hit.manifestRow;
 		boolean hasColors = listed != null && !listed.getUsableColors().isEmpty();
-		if (hasColors)
-		{
-			boolean blocked = ManifestRules.isRestrictedForAssignment(listed, config.assignedColor());
-			lockNote = blocked
-				? "<br/><span style='color:#cc4444;font-size:11px'>Blocked for your lock</span>"
-				: "<br/><span style='color:#559955;font-size:11px'>Ok for your lock</span>";
-		}
 
 		JLabel title = new JLabel("<html><body style='width:170px'><b>" + safeName + "</b>"
 			+ "<br/><span style='color:#909090;font-size:11px'>id " + hit.itemId
 			+ (hit.canon != hit.itemId ? " · canon " + hit.canon : "")
-			+ "</span>" + lockNote + "</body></html>");
+			+ "</span></body></html>");
 		title.setAlignmentX(Component.LEFT_ALIGNMENT);
 		textColumn.add(title);
 
-		JPanel dotRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-		dotRow.setOpaque(false);
+		Font smallUi = title.getFont().deriveFont(Font.PLAIN, 11f);
+		Color muted = new Color(150, 150, 160);
+
 		if (!hasColors)
 		{
+			JPanel noneRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+			noneRow.setOpaque(false);
 			JLabel none = new JLabel("Not in manifest");
-			none.setFont(none.getFont().deriveFont(Font.PLAIN, 11f));
-			none.setForeground(new Color(140, 140, 150));
-			dotRow.add(none);
+			none.setFont(smallUi);
+			none.setForeground(new Color(120, 120, 130));
+			noneRow.add(none);
+			textColumn.add(noneRow);
 		}
 		else
 		{
-			JLabel lab = new JLabel("Colors:");
-			lab.setFont(lab.getFont().deriveFont(Font.PLAIN, 11f));
-			lab.setForeground(new Color(170, 170, 180));
-			dotRow.add(lab);
+			boolean blocked = ManifestRules.isRestrictedForAssignment(listed, groupSync.effectiveAssignment(config));
+			ColorLockColor lock = groupSync.effectiveAssignment(config);
+
+			JPanel lockRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
+			lockRow.setOpaque(false);
+			JLabel yl = new JLabel("Your lock");
+			yl.setFont(smallUi);
+			yl.setForeground(muted);
+			lockRow.add(yl);
+			lockRow.add(new ColorSwatch(ColorLockPalette.toUiColor(lock.getKey()), lock.getKey(), 13));
+			JLabel st = new JLabel(blocked ? "— no match" : "— ok");
+			st.setFont(smallUi);
+			st.setForeground(muted);
+			lockRow.add(st);
+			textColumn.add(lockRow);
+
+			JPanel dotRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
+			dotRow.setOpaque(false);
 			for (String key : listed.getUsableColors())
 			{
 				String trimmed = key == null ? "" : key.trim();
@@ -238,10 +251,10 @@ public class ColorLockLookupPanel extends PluginPanel
 					continue;
 				}
 				Color awt = ColorLockPalette.toUiColor(trimmed);
-				dotRow.add(new ColorSwatch(awt, trimmed));
+				dotRow.add(new ColorSwatch(awt, trimmed, 12));
 			}
+			textColumn.add(dotRow);
 		}
-		textColumn.add(dotRow);
 
 		row.add(iconLabel, BorderLayout.WEST);
 		row.add(textColumn, BorderLayout.CENTER);
@@ -286,15 +299,17 @@ public class ColorLockLookupPanel extends PluginPanel
 	/** Small filled circle with palette tooltip. */
 	private static final class ColorSwatch extends JPanel
 	{
-		private static final int DIAM = 14;
 		private final Color fill;
+		private final int diam;
 
-		ColorSwatch(Color fill, String paletteTooltip)
+		ColorSwatch(Color fill, String paletteTooltip, int diameterPx)
 		{
 			this.fill = fill;
+			this.diam = Math.max(8, diameterPx);
 			setOpaque(false);
 			setToolTipText(paletteTooltip);
-			Dimension d = new Dimension(DIAM + 4, DIAM + 4);
+			int box = this.diam + 4;
+			Dimension d = new Dimension(box, box);
 			setPreferredSize(d);
 			setMinimumSize(d);
 			setMaximumSize(d);
@@ -308,13 +323,12 @@ public class ColorLockLookupPanel extends PluginPanel
 			try
 			{
 				g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-				int pad = 3;
-				int w = getWidth() - 2 * pad;
-				int h = getHeight() - 2 * pad;
+				int box = Math.min(getWidth(), getHeight());
+				int pad = Math.max(2, (box - diam) / 2);
 				g2.setColor(fill);
-				g2.fillOval(pad, pad, w, h);
-				g2.setColor(new Color(55, 55, 62));
-				g2.drawOval(pad, pad, w, h);
+				g2.fillOval(pad, pad, diam, diam);
+				g2.setColor(new Color(45, 45, 52));
+				g2.drawOval(pad, pad, diam, diam);
 			}
 			finally
 			{

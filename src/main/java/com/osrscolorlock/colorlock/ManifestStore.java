@@ -27,6 +27,10 @@ public class ManifestStore
 	private volatile int manifestSchemaVersion = -1;
 	private volatile String loadError;
 
+	/** After first successful load, used to detect drift on refresh. */
+	private volatile int lastSnapshotItemCount = -1;
+	private volatile int lastSnapshotSchemaVersion = Integer.MIN_VALUE;
+
 	@Inject
 	public ManifestStore(ClientThread clientThread)
 	{
@@ -145,11 +149,40 @@ public class ManifestStore
 			}
 			byId = ManifestJson.toUnmodifiableMap(list);
 			manifestSchemaVersion = schemaSeen == null ? -1 : schemaSeen;
-			log.info(() -> String.format(
-				"color-lock manifest loaded %d items schemaVersion=%s",
-				byId.size(),
-				Integer.toString(manifestSchemaVersion)
-			));
+			final int prevC = lastSnapshotItemCount;
+			final int prevS = lastSnapshotSchemaVersion;
+			int n = byId.size();
+			int s = manifestSchemaVersion;
+			boolean firstLoad = prevC < 0;
+			boolean changed = !firstLoad && (n != prevC || s != prevS);
+			if (changed)
+			{
+				log.info(() -> String.format(
+					"Items manifest resynced with host (was %d items schema %d — now %d items schema %d)",
+					prevC,
+					prevS,
+					n,
+					s
+				));
+			}
+			lastSnapshotItemCount = n;
+			lastSnapshotSchemaVersion = s;
+			if (firstLoad || changed)
+			{
+				log.info(() -> String.format(
+					"color-lock manifest loaded %d items schemaVersion=%s",
+					byId.size(),
+					Integer.toString(manifestSchemaVersion)
+				));
+			}
+			else
+			{
+				log.fine(() -> String.format(
+					"color-lock manifest refresh OK (still %d items, schema %d)",
+					n,
+					s
+				));
+			}
 		}
 		finally
 		{

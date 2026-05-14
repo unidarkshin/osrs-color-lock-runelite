@@ -18,6 +18,46 @@ public interface ColorLockConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "syncGroupAssignmentFromWeb",
+		name = "Sync color from crew (web app)",
+		description = "When on, overrides \"Your color lock\" with assignment from osrs-color-lock after group rotation (requires slug + member code). Same server as Items JSON URL."
+	)
+	default boolean syncGroupAssignmentFromWeb()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "groupSlug",
+		name = "Crew slug",
+		description = "Group slug from hub URL (/g/...)"
+	)
+	default String groupSlug()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+		keyName = "memberPublicCode",
+		name = "Member code",
+		description = "Your FoxMango224-style restore code shown in Color Lock Hub"
+	)
+	default String memberPublicCode()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+		keyName = "groupJoinPasscode",
+		name = "Crew join password (optional)",
+		description = "Only if admins set a password on Join — required so plugin-resolve can authenticate"
+	)
+	default String groupJoinPasscode()
+	{
+		return "";
+	}
+
+	@ConfigItem(
 		keyName = "itemsUrl",
 		name = "Items JSON URL",
 		description = "/data/items.json or /api/items on deployed app — see DATA_CONTRACT.md"
@@ -33,6 +73,26 @@ public interface ColorLockConfig extends Config
 		description = "Fetches JSON in background; turn off only if you load data another way"
 	)
 	default boolean enableDownloadOnStartup()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "manifestRefreshIntervalMinutes",
+		name = "Re-fetch items every (minutes)",
+		description = "0 = off. Pulls latest items.json / api/items so usableColors stays aligned with the website. Recommended: 60."
+	)
+	default int manifestRefreshIntervalMinutes()
+	{
+		return 60;
+	}
+
+	@ConfigItem(
+		keyName = "refreshManifestOnGameLogin",
+		name = "Re-fetch items when you log in",
+		description = "Runs once when the client reaches the logged-in state (after world login / hop). Catches updates without waiting for the interval."
+	)
+	default boolean refreshManifestOnGameLogin()
 	{
 		return true;
 	}

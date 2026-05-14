@@ -3,6 +3,10 @@ package com.osrscolorlock.colorlock;
 import java.awt.GraphicsEnvironment;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 import javax.inject.Inject;
@@ -11,10 +15,12 @@ import javax.inject.Provider;
 import com.google.inject.Provides;
 
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.Menu;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.events.BeforeMenuRender;
 import net.runelite.api.events.ClientTick;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
@@ -48,6 +54,9 @@ public class ColorLockPlugin extends Plugin
 	private ManifestStore manifestStore;
 
 	@Inject
+	private ColorLockGroupSync groupSync;
+
+	@Inject
 	private Client client;
 
 	@Inject
@@ -70,6 +79,12 @@ public class ColorLockPlugin extends Plugin
 
 	private NavigationButton lookupNavButton;
 
+	private static final long LOGIN_REFRESH_DEBOUNCE_MS = 90_000L;
+
+	private ScheduledExecutorService refreshScheduler;
+	private ScheduledFuture<?> scheduledManifestRefresh;
+	private volatile long lastDebouncedRefreshMs;
+
 	@Provides
 	ColorLockConfig provideConfig(ConfigManager configManager)
 	{
@@ -91,6 +106,14 @@ public class ColorLockPlugin extends Plugin
 			clientToolbar.addNavigation(lookupNavButton);
 		}
 		kickoffFetch();
+		kickoffGroupSync();
+		lastDebouncedRefreshMs = System.currentTimeMillis();
+		schedulePeriodicManifestRefresh();
+	}
+
+	private ColorLockColor assignment()
+	{
+		return groupSync.effectiveAssignment(config);
 	}
 
 	@Override
@@ -102,15 +125,54 @@ public class ColorLockPlugin extends Plugin
 			clientToolbar.removeNavigation(lookupNavButton);
 			lookupNavButton = null;
 		}
+		cancelPeriodicManifestRefresh();
+		if (refreshScheduler != null)
+		{
+			refreshScheduler.shutdown();
+			refreshScheduler = null;
+		}
 	}
 
 	@Subscribe
 	public void onConfigChanged(ConfigChanged evt)
 	{
-		if ("colorlockhelper".equals(evt.getGroup()) && config.enableDownloadOnStartup())
+		if (!"colorlockhelper".equals(evt.getGroup()))
+		{
+			return;
+		}
+		if (config.enableDownloadOnStartup())
 		{
 			kickoffFetch();
 		}
+		kickoffGroupSync();
+		schedulePeriodicManifestRefresh();
+	}
+
+	@Subscribe
+	public void onGameStateChanged(GameStateChanged event)
+	{
+		if (event.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		if (!config.refreshManifestOnGameLogin())
+		{
+			return;
+		}
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		synchronized (this)
+		{
+			if (lastDebouncedRefreshMs != 0L && now - lastDebouncedRefreshMs < LOGIN_REFRESH_DEBOUNCE_MS)
+			{
+				return;
+			}
+			lastDebouncedRefreshMs = now;
+		}
+		kickoffRemoteRefreshCycle();
 	}
 
 	@Subscribe
@@ -315,7 +377,7 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
-		if (manifestStore.isRestrictedForAssignment(itemId, config.assignedColor(), itemManager))
+		if (manifestStore.isRestrictedForAssignment(itemId, assignment(), itemManager))
 		{
 			event.consume();
 		}
@@ -336,12 +398,65 @@ public class ColorLockPlugin extends Plugin
 		{
 			return false;
 		}
-		return manifestStore.isRestrictedForAssignment(itemId, config.assignedColor(), itemManager);
+		return manifestStore.isRestrictedForAssignment(itemId, assignment(), itemManager);
 	}
 
 	private boolean shouldStripUseMenuEntry(MenuEntry e)
 	{
 		return restrictUseMenuEntry(e);
+	}
+
+	private void kickoffRemoteRefreshCycle()
+	{
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		manifestStore.downloadAsync(config, () -> validateSchemaQuietly());
+		kickoffGroupSync();
+	}
+
+	private void schedulePeriodicManifestRefresh()
+	{
+		cancelPeriodicManifestRefresh();
+		int minutes = Math.max(0, config.manifestRefreshIntervalMinutes());
+		if (minutes <= 0)
+		{
+			return;
+		}
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		if (refreshScheduler == null)
+		{
+			refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+				Thread t = new Thread(r, "osrs-color-lock-periodic");
+				t.setDaemon(true);
+				return t;
+			});
+		}
+		scheduledManifestRefresh = refreshScheduler.scheduleAtFixedRate(
+			() -> {
+				if (GraphicsEnvironment.isHeadless())
+				{
+					return;
+				}
+				kickoffRemoteRefreshCycle();
+			},
+			minutes,
+			minutes,
+			TimeUnit.MINUTES
+		);
+	}
+
+	private void cancelPeriodicManifestRefresh()
+	{
+		if (scheduledManifestRefresh != null)
+		{
+			scheduledManifestRefresh.cancel(false);
+			scheduledManifestRefresh = null;
+		}
 	}
 
 	private void kickoffFetch()
@@ -355,6 +470,15 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		manifestStore.downloadAsync(config, () -> validateSchemaQuietly());
+	}
+
+	private void kickoffGroupSync()
+	{
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		groupSync.refreshAsync(config, () -> {});
 	}
 
 	private void validateSchemaQuietly()

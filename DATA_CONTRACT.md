@@ -33,3 +33,9 @@ Other fields (`stabAttack`, `tierLabel`, …) may be ignored.
 If `usableColors` is missing → treat manifest as stale; refuse to gate actions or bundle a pinned snapshot release.
 
 Bump `schemaVersion` in web app (`src/lib/colorLockItemsPayload.ts`) whenever you intentionally break consumers; update this doc and publish a matching plugin release.
+
+## Crew / group assignment (plugin)
+
+Deployments with **Redis** (group hub):
+
+- `POST https://<host>/api/groups/<slug>/plugin-resolve` — body `{ "publicCode": "<code>", "joinPasscode": "..." }` (omit or empty `joinPasscode` when the crew does not use one). Response JSON includes `member.assignedColor` and `group.enabledColors`.
