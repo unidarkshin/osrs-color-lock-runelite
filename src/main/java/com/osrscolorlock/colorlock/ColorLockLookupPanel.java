@@ -59,6 +59,16 @@ public class ColorLockLookupPanel extends PluginPanel
 	/** Before the panel is in the hierarchy, use a fraction of the screen as a height hint. */
 	private static final int MIN_LOOKUP_PANEL_HEIGHT = 480;
 
+	private static boolean parseStoredToggle(ConfigManager cm, String key, boolean defaultValue)
+	{
+		String raw = cm.getConfiguration("colorlockhelper", key);
+		if (raw == null || raw.isEmpty())
+		{
+			return defaultValue;
+		}
+		return Boolean.parseBoolean(raw);
+	}
+
 	private final Client client;
 	private final ClientThread clientThread;
 	private final ManifestStore manifestStore;
@@ -114,8 +124,8 @@ public class ColorLockLookupPanel extends PluginPanel
 		searchRow.setAlignmentX(Component.LEFT_ALIGNMENT);
 		north.add(searchRow);
 
-		boolean palCfg = config.lookupMyPaletteOnly();
-		boolean optOutCfg = config.lookupAllColorsRowsOnly();
+		boolean palCfg = parseStoredToggle(configManager, "lookupMyPaletteOnly", false);
+		boolean optOutCfg = parseStoredToggle(configManager, "lookupAllColorsRowsOnly", false);
 		if (palCfg && optOutCfg)
 		{
 			optOutCfg = false;
@@ -123,7 +133,7 @@ public class ColorLockLookupPanel extends PluginPanel
 		}
 		myPaletteOnlyCheckbox.setSelected(palCfg);
 		myPaletteOnlyCheckbox.setToolTipText(
-			"Only items your color lock can use (crew overlap applies). Mutually exclusive with All-colors-only.");
+			"Only items your color lock can use (group palette intersect). Mutually exclusive with All-colors-only.");
 		myPaletteOnlyCheckbox.setAlignmentX(Component.LEFT_ALIGNMENT);
 		JPanel paletteRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
 		paletteRow.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -146,7 +156,7 @@ public class ColorLockLookupPanel extends PluginPanel
 		hint0.setAlignmentX(Component.LEFT_ALIGNMENT);
 		south.add(hint0);
 		south.add(Box.createVerticalStrut(6));
-		JLabel siteHead = new JLabel("<html><body style='width:220px'><b>Color Lock site</b></body></html>");
+		JLabel siteHead = new JLabel("<html><body style='width:220px'><b>Color Locked hub</b></body></html>");
 		siteHead.setAlignmentX(Component.LEFT_ALIGNMENT);
 		south.add(siteHead);
 		south.add(urlLink(ColorLockWeb.HUB));
@@ -360,6 +370,13 @@ public class ColorLockLookupPanel extends PluginPanel
 
 	private JPanel createResultRow(LookupHit hit)
 	{
+		ManifestItem listedEarly = hit.manifestRow;
+		boolean hasColorsEarly = listedEarly != null && !listedEarly.getUsableColors().isEmpty();
+		if (hasColorsEarly && !ManifestRules.isLockEnforced(listedEarly))
+		{
+			return createCompactOptOutLookupRow(hit);
+		}
+
 		JPanel row = new JPanel();
 		row.setLayout(new BoxLayout(row, BoxLayout.Y_AXIS));
 		row.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -384,8 +401,6 @@ public class ColorLockLookupPanel extends PluginPanel
 		Font smallUi = bodyColumn.getFont().deriveFont(Font.PLAIN, 11f);
 		Color muted = new Color(150, 150, 160);
 
-		Color excludedGreen = new Color(110, 170, 120);
-
 		if (!hasColors)
 		{
 			JPanel miss = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
@@ -395,16 +410,6 @@ public class ColorLockLookupPanel extends PluginPanel
 			none.setForeground(new Color(120, 120, 130));
 			miss.add(none);
 			bodyColumn.add(miss);
-		}
-		else if (!ManifestRules.isLockEnforced(listed))
-		{
-			JPanel exRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-			exRow.setOpaque(false);
-			JLabel ex = new JLabel("All colors");
-			ex.setFont(ex.getFont().deriveFont(Font.BOLD, 12.5f));
-			ex.setForeground(excludedGreen);
-			exRow.add(ex);
-			bodyColumn.add(exRow);
 		}
 		else
 		{
@@ -417,7 +422,7 @@ public class ColorLockLookupPanel extends PluginPanel
 				List<String> crewOverlap = ManifestRules.usableColorsEffectiveForCrew(listed, crewFilter);
 				JPanel crewRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
 				crewRow.setOpaque(false);
-				JLabel cl = new JLabel("Crew");
+				JLabel cl = new JLabel("Group");
 				cl.setFont(smallUi);
 				cl.setForeground(muted);
 				crewRow.add(cl);
@@ -450,6 +455,33 @@ public class ColorLockLookupPanel extends PluginPanel
 		iconBody.add(iconLabel, BorderLayout.WEST);
 		iconBody.add(bodyColumn, BorderLayout.CENTER);
 		row.add(iconBody);
+		attachWikiOpenToLookupRow(row, hit);
+		return row;
+	}
+
+	/** Hub opt-out rows: one short strip (no full-width title + extra strut). */
+	private JPanel createCompactOptOutLookupRow(LookupHit hit)
+	{
+		JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+		row.setOpaque(false);
+		row.setAlignmentX(Component.LEFT_ALIGNMENT);
+		row.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(55, 55, 62)),
+			BorderFactory.createEmptyBorder(6, 4, 6, 4)));
+
+		JLabel iconLabel = new JLabel();
+		iconLabel.setPreferredSize(new Dimension(ICON_SLOT, ICON_SLOT));
+		iconLabel.setHorizontalAlignment(JLabel.CENTER);
+		iconLabel.setVerticalAlignment(JLabel.CENTER);
+		itemManager.getImage(hit.itemId).addTo(iconLabel);
+		row.add(iconLabel);
+
+		String safe = escapeHtml(hit.name.trim());
+		JLabel text = new JLabel("<html><body style='width:165px'><b>" + safe
+			+ ":</b> <span style='color:#6EAA78;font-weight:bold'>All colors</span></body></html>");
+		text.setVerticalAlignment(JLabel.TOP);
+		row.add(text);
+
 		attachWikiOpenToLookupRow(row, hit);
 		return row;
 	}

@@ -7,30 +7,14 @@ import net.runelite.client.config.ConfigItem;
 @ConfigGroup("colorlockhelper")
 public interface ColorLockConfig extends Config
 {
-	@ConfigItem(
-		keyName = "assignedColor",
-		name = "Your color lock",
-		description = "Item actions are validated against manifests using usableColors from osrs-color-lock"
-	)
-	default ColorLockColor assignedColor()
-	{
-		return ColorLockColor.RED;
-	}
+	/** Config row label title — used to find this row in RL settings UI. Must match {@link #assignedColor()} name exactly. */
+	String ASSIGNED_COLOR_CONFIG_NAME = "Your color lock";
 
 	@ConfigItem(
-		keyName = "syncGroupAssignmentFromWeb",
-		name = "Sync color from crew (web app)",
-		description = "When on, overrides \"Your color lock\" with assignment from osrs-color-lock after group rotation (requires slug + member code). Same server as Items JSON URL."
-	)
-	default boolean syncGroupAssignmentFromWeb()
-	{
-		return false;
-	}
-
-	@ConfigItem(
+		position = 10,
 		keyName = "groupSlug",
-		name = "Crew slug",
-		description = "Group slug from hub URL (/g/...)"
+		name = "Group code",
+		description = "From your Color Lock hub URL (/g/…)."
 	)
 	default String groupSlug()
 	{
@@ -38,19 +22,10 @@ public interface ColorLockConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "memberPublicCode",
-		name = "Member code",
-		description = "Your FoxMango224-style restore code shown in Color Lock Hub"
-	)
-	default String memberPublicCode()
-	{
-		return "";
-	}
-
-	@ConfigItem(
+		position = 11,
 		keyName = "groupJoinPasscode",
-		name = "Crew join password (optional)",
-		description = "Only if admins set a password on Join — required so plugin-resolve can authenticate"
+		name = "Group password (optional)",
+		description = "Only if your group uses a join password — required for plugin-resolve."
 	)
 	default String groupJoinPasscode()
 	{
@@ -58,102 +33,48 @@ public interface ColorLockConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "itemsUrl",
-		name = "Items JSON URL",
-		description = "/data/items.json or /api/items on the deployed app (" + ColorLockWeb.ITEMS_PAGE + ")."
+		position = 12,
+		keyName = "memberPublicCode",
+		name = "Member code",
+		description = "Your member/public code from the hub; together with Group code authenticates against the hub."
 	)
-	default String itemsUrl()
+	default String memberPublicCode()
 	{
-		return ColorLockWeb.DEFAULT_ITEMS_JSON;
+		return "";
 	}
 
 	@ConfigItem(
-		keyName = "enableDownload",
-		name = "Download manifest on startup",
-		description = "Fetches JSON in background; turn off only if you load data another way"
+		position = 13,
+		keyName = "hubGroupSyncEnabled",
+		name = "Sync with group",
+		description = "Authenticate to the hub with Group code + Member code, pull roster and assigned color from the hub, "
+			+ "and reload item rules. Requires both fields filled. Uncheck to use only manual color-lock below."
 	)
-	default boolean enableDownloadOnStartup()
+	default boolean hubGroupSyncEnabled()
 	{
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
-		keyName = "manifestRefreshIntervalMinutes",
-		name = "Re-fetch items every (minutes)",
-		description = "0 = off. Pulls latest items.json / api/items so usableColors stays aligned with the website. Recommended: 60."
+		position = 20,
+		keyName = "assignedColor",
+		name = ASSIGNED_COLOR_CONFIG_NAME,
+		description = "Manual fallback when Sync with group is off, or hub has no assigned color yet. "
+			+ "After a hub sync with an assigned color, we save it here, show it in the list, and gray this row until you turn sync off."
 	)
-	default int manifestRefreshIntervalMinutes()
+	default ColorLockColor assignedColor()
 	{
-		return 60;
+		return ColorLockColor.RED;
 	}
 
 	@ConfigItem(
-		keyName = "refreshManifestOnGameLogin",
-		name = "Re-fetch items when you log in",
-		description = "Runs once when the client reaches the logged-in state (after world login / hop). Catches updates without waiting for the interval."
-	)
-	default boolean refreshManifestOnGameLogin()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "enforceRestrictions",
-		name = "Block Eat / Equip / …",
-		description = "Remove use verbs from menus when your color lock cannot use the item (manifest must be loaded)"
-	)
-	default boolean enforceRestrictions()
-	{
-		return true;
-	}
-
-	@ConfigItem(
+		position = 30,
 		keyName = "showColorOverlay",
 		name = "Mark restricted items",
-		description = "Draws a red corner X on inventory / bank / worn slots your color lock cannot use"
+		description = "Red corner mark on inventory / bank / worn gear your color lock cannot use."
 	)
 	default boolean showColorOverlay()
 	{
 		return true;
-	}
-
-	@ConfigItem(
-		keyName = "plainListedItemMenus",
-		name = "Plain menus for listed items",
-		description = "Remove Jagex color tags from menu option text for manifest-listed items (default click + right-click rows)"
-	)
-	default boolean plainListedItemMenus()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "enableLookupPanel",
-		name = "Show lookup side panel",
-		description = "Toolbar panel: search items by name, see ids, canonical id, and manifest status"
-	)
-	default boolean enableLookupPanel()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "lookupMyPaletteOnly",
-		name = "Lookup: palette filter",
-		description = "When toggled from the Lookup panel checkbox, searches only items your color lock can use (crew rules apply)."
-	)
-	default boolean lookupMyPaletteOnly()
-	{
-		return false;
-	}
-
-	@ConfigItem(
-		keyName = "lookupAllColorsRowsOnly",
-		name = "Lookup: hub opt-out rows only",
-		description = "When toggled from the Lookup panel, searches only hub opt-out listings (shown as \"All colors\")."
-	)
-	default boolean lookupAllColorsRowsOnly()
-	{
-		return false;
 	}
 }

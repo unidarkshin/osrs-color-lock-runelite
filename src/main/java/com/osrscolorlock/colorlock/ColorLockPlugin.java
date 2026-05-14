@@ -1,6 +1,14 @@
 package com.osrscolorlock.colorlock;
 
+import java.awt.BorderLayout;
+import java.awt.Component;
+import java.awt.Container;
 import java.awt.GraphicsEnvironment;
+import java.awt.Window;
+import javax.swing.JComboBox;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -24,7 +32,10 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.api.ChatMessageType;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.chat.ChatMessageManager;
+import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
@@ -32,14 +43,15 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.Text;
 
 @PluginDescriptor(
-	name = "Color Lock Helper",
-	description = "Color-lock manifest, lookup tooltips, and Eat/Equip restrictions from osrs-color-lock data",
-	tags = {"ironman", "gim", "color-lock"}
+	name = "Color Locked",
+	description = "Group Iron color-lock: hub rules, menu blocking, red marks, and item lookup.",
+	tags = {"ironman", "gim", "color-lock", "groupiron"}
 )
 public class ColorLockPlugin extends Plugin
 {
@@ -47,14 +59,26 @@ public class ColorLockPlugin extends Plugin
 
 	static final int EXPECTED_SCHEMA_VERSION = 2;
 
+	/** Fixed background interval for manifest refresh (no config UI). */
+	private static final int MANIFEST_REFRESH_INTERVAL_MINUTES = 60;
+
 	private void migrateLegacyItemsUrlIfNeeded()
 	{
-		if (!ColorLockWeb.shouldMigrateLegacyVercelItemsUrl(config.itemsUrl()))
+		String configured = configManager.getConfiguration("colorlockhelper", "itemsUrl");
+		if (!ColorLockWeb.shouldMigrateLegacyVercelItemsUrl(configured))
 		{
 			return;
 		}
 		configManager.setConfiguration("colorlockhelper", "itemsUrl", ColorLockWeb.DEFAULT_ITEMS_JSON);
-		log.info("Updated Items JSON URL from legacy osrs-color-lock.vercel.app to " + ColorLockWeb.DEFAULT_ITEMS_JSON);
+		log.info("Updated stored items URL from legacy osrs-color-lock.vercel.app to " + ColorLockWeb.DEFAULT_ITEMS_JSON);
+	}
+
+	private void unsetLegacySyncDropdownKeyIfPresent()
+	{
+		if (configManager.getConfiguration("colorlockhelper", "syncToGroupAction") != null)
+		{
+			configManager.unsetConfiguration("colorlockhelper", "syncToGroupAction");
+		}
 	}
 
 	@Inject
@@ -88,6 +112,9 @@ public class ColorLockPlugin extends Plugin
 	private ClientToolbar clientToolbar;
 
 	@Inject
+	private ChatMessageManager chatMessageManager;
+
+	@Inject
 	private Provider<ColorLockLookupPanel> lookupPanelProvider;
 
 	private NavigationButton lookupNavButton;
@@ -97,6 +124,8 @@ public class ColorLockPlugin extends Plugin
 	private ScheduledExecutorService refreshScheduler;
 	private ScheduledFuture<?> scheduledManifestRefresh;
 	private volatile long lastDebouncedRefreshMs;
+	private long lastSeenHubPresentationEpochInSettingsUi = Long.MIN_VALUE;
+	private long lastMuteSwingMs;
 
 	@Provides
 	ColorLockConfig provideConfig(ConfigManager configManager)
@@ -108,19 +137,16 @@ public class ColorLockPlugin extends Plugin
 	protected void startUp()
 	{
 		migrateLegacyItemsUrlIfNeeded();
+		unsetLegacySyncDropdownKeyIfPresent();
 		overlayManager.add(itemOverlay);
-		if (config.enableLookupPanel())
-		{
-			lookupNavButton = NavigationButton.builder()
-				.tooltip("Color lock lookup")
-				.icon(ColorLockLookupPanel.createNavIcon())
-				.priority(7)
-				.panel(lookupPanelProvider.get())
-				.build();
-			clientToolbar.addNavigation(lookupNavButton);
-		}
+		lookupNavButton = NavigationButton.builder()
+			.tooltip("Color Locked lookup")
+			.icon(ColorLockLookupPanel.createNavIcon())
+			.priority(7)
+			.panel(lookupPanelProvider.get())
+			.build();
+		clientToolbar.addNavigation(lookupNavButton);
 		kickoffFetch();
-		kickoffGroupSync();
 		lastDebouncedRefreshMs = System.currentTimeMillis();
 		schedulePeriodicManifestRefresh();
 	}
@@ -154,22 +180,36 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
-		if (config.enableDownloadOnStartup())
+		String key = evt.getKey();
+		if ("hubGroupSyncEnabled".equals(key))
 		{
-			kickoffFetch();
+			boolean on = parseConfigBoolean(evt.getNewValue());
+			if (on)
+			{
+				if (!groupSlugAndMemberCodeFilled(config))
+				{
+					log.warning("Sync with group needs non-empty Group code and Member code. Checkbox turned off.");
+					SwingUtilities.invokeLater(() ->
+						configManager.setConfiguration(evt.getGroup(), key, Boolean.FALSE.toString()));
+					groupSync.clearHubSessionBlocking();
+					return;
+				}
+				runOneShotHubSyncThenManifestAndMirror();
+			}
+			else
+			{
+				groupSync.clearHubSessionBlocking();
+			}
+			lastSeenHubPresentationEpochInSettingsUi = Long.MIN_VALUE;
+			return;
 		}
-		kickoffGroupSync();
-		schedulePeriodicManifestRefresh();
+		kickoffFetch();
 	}
 
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
 		if (event.getGameState() != GameState.LOGGED_IN)
-		{
-			return;
-		}
-		if (!config.refreshManifestOnGameLogin())
 		{
 			return;
 		}
@@ -186,7 +226,11 @@ public class ColorLockPlugin extends Plugin
 			}
 			lastDebouncedRefreshMs = now;
 		}
-		kickoffRemoteRefreshCycle();
+		manifestStore.downloadAsync(this::validateSchemaQuietly);
+		if (config.hubGroupSyncEnabled() && groupSlugAndMemberCodeFilled(config))
+		{
+			runLoginVerification();
+		}
 	}
 
 	@Subscribe
@@ -194,7 +238,7 @@ public class ColorLockPlugin extends Plugin
 	{
 		MenuEntry e = event.getMenuEntry();
 		plainListedEntry(e);
-		if (!config.enforceRestrictions() || manifestStore.itemCount() == 0)
+		if (manifestStore.itemCount() == 0)
 		{
 			return;
 		}
@@ -233,6 +277,7 @@ public class ColorLockPlugin extends Plugin
 	@Subscribe
 	public void onClientTick(ClientTick tick)
 	{
+		maybeRefreshAssignedColorRowGreyState();
 		if (manifestStore.itemCount() == 0)
 		{
 			return;
@@ -244,7 +289,7 @@ public class ColorLockPlugin extends Plugin
 		stripOpenMenu();
 	}
 
-	/** Plain labels + optionally strip restricted verbs from the live menu (submenus included). */
+	/** Plain labels + strip restricted verbs from the live menu (submenus included). */
 	private void stripOpenMenu()
 	{
 		if (manifestStore.itemCount() == 0 || !client.isMenuOpen())
@@ -252,14 +297,7 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		Menu root = client.getMenu();
-		if (config.plainListedItemMenus())
-		{
-			plainMenuLevel(root);
-		}
-		if (!config.enforceRestrictions())
-		{
-			return;
-		}
+		plainMenuLevel(root);
 		stripMenuLevel(root);
 	}
 
@@ -295,7 +333,7 @@ public class ColorLockPlugin extends Plugin
 
 	private void plainListedEntry(MenuEntry e)
 	{
-		if (!config.plainListedItemMenus() || manifestStore.itemCount() == 0)
+		if (manifestStore.itemCount() == 0)
 		{
 			return;
 		}
@@ -365,7 +403,7 @@ public class ColorLockPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
-		if (!config.enforceRestrictions() || manifestStore.itemCount() == 0)
+		if (manifestStore.itemCount() == 0)
 		{
 			return;
 		}
@@ -399,7 +437,7 @@ public class ColorLockPlugin extends Plugin
 
 	private boolean restrictUseMenuEntry(MenuEntry e)
 	{
-		if (!config.enforceRestrictions() || manifestStore.itemCount() == 0)
+		if (manifestStore.itemCount() == 0)
 		{
 			return false;
 		}
@@ -426,18 +464,13 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
-		manifestStore.downloadAsync(config, () -> validateSchemaQuietly());
-		kickoffGroupSync();
+		manifestStore.downloadAsync(() -> validateSchemaQuietly());
 	}
 
 	private void schedulePeriodicManifestRefresh()
 	{
 		cancelPeriodicManifestRefresh();
-		int minutes = Math.max(0, config.manifestRefreshIntervalMinutes());
-		if (minutes <= 0)
-		{
-			return;
-		}
+		int minutes = MANIFEST_REFRESH_INTERVAL_MINUTES;
 		if (GraphicsEnvironment.isHeadless())
 		{
 			return;
@@ -475,24 +508,99 @@ public class ColorLockPlugin extends Plugin
 
 	private void kickoffFetch()
 	{
-		if (!config.enableDownloadOnStartup())
-		{
-			return;
-		}
 		if (GraphicsEnvironment.isHeadless())
 		{
 			return;
 		}
-		manifestStore.downloadAsync(config, () -> validateSchemaQuietly());
+		manifestStore.downloadAsync(() -> validateSchemaQuietly());
 	}
 
-	private void kickoffGroupSync()
+	/** One shot: auth + state, then manifest, then mirror hub-assigned color into config. Runs only on checkbox-on. */
+	private void runOneShotHubSyncThenManifestAndMirror()
 	{
 		if (GraphicsEnvironment.isHeadless())
 		{
 			return;
 		}
-		groupSync.refreshAsync(config, () -> {});
+		groupSync.refreshAsync(config, () -> {
+			mirrorHubAssignedColorIntoConfig();
+			manifestStore.downloadAsync(this::validateSchemaQuietly);
+		});
+	}
+
+	/** Login-only verification: re-auth + state, then banner in chat if anything changed/blocked. */
+	private void runLoginVerification()
+	{
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		ColorLockColor savedBefore = config.assignedColor();
+		groupSync.refreshAsync(config, () -> {
+			mirrorHubAssignedColorIntoConfig();
+			postLoginVerificationBanner(savedBefore);
+		});
+	}
+
+	private void mirrorHubAssignedColorIntoConfig()
+	{
+		ColorLockColor hub = groupSync.getHubAssignedColor();
+		if (hub == null)
+		{
+			return;
+		}
+		if (hub == config.assignedColor())
+		{
+			return;
+		}
+		configManager.setConfiguration("colorlockhelper", "assignedColor", hub.name());
+		lastSeenHubPresentationEpochInSettingsUi = Long.MIN_VALUE;
+	}
+
+	private void postLoginVerificationBanner(ColorLockColor savedBefore)
+	{
+		int auth = groupSync.getLastAuthHttpStatus();
+		int state = groupSync.getLastStateHttpStatus();
+		boolean ok = groupSync.isResolvedOk();
+		boolean active = groupSync.isLastMemberActive();
+		ColorLockColor hubNow = groupSync.getHubAssignedColor();
+
+		String msg = null;
+		if (auth == 401 || auth == 403)
+		{
+			msg = "Color Locked: hub auth rejected (HTTP " + auth + "). Check Group code, Member code, and password.";
+		}
+		else if (auth == 404)
+		{
+			msg = "Color Locked: hub does not recognise this Group code.";
+		}
+		else if (auth != java.net.HttpURLConnection.HTTP_OK)
+		{
+			msg = "Color Locked: could not reach hub (auth status " + auth + "). Sync will retry next login.";
+		}
+		else if (!active)
+		{
+			msg = "Color Locked: your hub membership is not active. Manual color-lock is in effect.";
+		}
+		else if (!ok)
+		{
+			msg = "Color Locked: hub state read failed (HTTP " + state + "). Color may be stale.";
+		}
+		else if (hubNow != null && savedBefore != null && hubNow != savedBefore)
+		{
+			msg = "Color Locked: hub changed your assignment to " + hubNow.getKey()
+				+ " (was " + savedBefore.getKey() + "). Settings updated.";
+		}
+		if (msg == null)
+		{
+			return;
+		}
+		final String chatLine = msg;
+		clientThread.invokeLater(() -> chatMessageManager.queue(QueuedMessage.builder()
+			.type(ChatMessageType.GAMEMESSAGE)
+			.runeLiteFormattedMessage("<col=ff5555>" + chatLine + "</col>")
+			.build()));
+		log.warning(chatLine);
 	}
 
 	private void validateSchemaQuietly()
@@ -507,5 +615,113 @@ public class ColorLockPlugin extends Plugin
 		{
 			log.warning("Items schemaVersion=" + v + " plugin expects " + EXPECTED_SCHEMA_VERSION + " — see DATA_CONTRACT.md");
 		}
+	}
+
+	private static boolean parseConfigBoolean(String raw)
+	{
+		return raw != null && Boolean.parseBoolean(raw.trim());
+	}
+
+	private static boolean groupSlugAndMemberCodeFilled(ColorLockConfig cfg)
+	{
+		if (cfg == null)
+		{
+			return false;
+		}
+		String slug = cfg.groupSlug() == null ? "" : cfg.groupSlug().trim();
+		String code = cfg.memberPublicCode() == null ? "" : cfg.memberPublicCode().trim();
+		return !slug.isEmpty() && !code.isEmpty();
+	}
+
+	private void maybeRefreshAssignedColorRowGreyState()
+	{
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		long epoch = groupSync.hubPresentationEpoch();
+		boolean epochChanged = epoch != lastSeenHubPresentationEpochInSettingsUi;
+		if (!epochChanged && now - lastMuteSwingMs < 500L)
+		{
+			return;
+		}
+		lastSeenHubPresentationEpochInSettingsUi = epoch;
+		lastMuteSwingMs = now;
+		final boolean mute = groupSync.hubOverridesManualAssignedColor(config);
+		SwingUtilities.invokeLater(() -> applyAssignedColorRowMuteInConfigPanels(mute));
+	}
+
+	private static void applyAssignedColorRowMuteInConfigPanels(boolean disableManualPicker)
+	{
+		String wantTitle = ColorLockConfig.ASSIGNED_COLOR_CONFIG_NAME;
+		for (Window w : Window.getWindows())
+		{
+			if (w == null || !w.isDisplayable())
+			{
+				continue;
+			}
+			JLabel rowLabel = findJLabelMatchingText(w, wantTitle);
+			if (rowLabel == null)
+			{
+				continue;
+			}
+			Container rowPanel = rowLabel.getParent();
+			if (!(rowPanel instanceof JPanel))
+			{
+				continue;
+			}
+			JPanel jp = (JPanel) rowPanel;
+			if (!(jp.getLayout() instanceof BorderLayout))
+			{
+				continue;
+			}
+			BorderLayout bl = (BorderLayout) jp.getLayout();
+			Component east = bl.getLayoutComponent(BorderLayout.EAST);
+			if (!(east instanceof JComboBox<?>))
+			{
+				continue;
+			}
+			rowLabel.setEnabled(!disableManualPicker);
+			east.setEnabled(!disableManualPicker);
+			rowLabel.setForeground(disableManualPicker
+				? ColorScheme.MEDIUM_GRAY_COLOR : ColorScheme.TEXT_COLOR);
+			return;
+		}
+	}
+
+	private static JLabel findJLabelMatchingText(Component root, String exact)
+	{
+		if (root instanceof JLabel)
+		{
+			String t = normalizeLabelText(((JLabel) root).getText());
+			if (exact.equals(t))
+			{
+				return (JLabel) root;
+			}
+		}
+		if (root instanceof Container)
+		{
+			for (Component ch : ((Container) root).getComponents())
+			{
+				JLabel hit = findJLabelMatchingText(ch, exact);
+				if (hit != null)
+				{
+					return hit;
+				}
+			}
+		}
+		return null;
+	}
+
+	private static String normalizeLabelText(String raw)
+	{
+		if (raw == null)
+		{
+			return "";
+		}
+		String noTags = raw.replaceAll("<[^>]*>", "").trim();
+		String oneLine = noTags.replace('\n', ' ').trim();
+		return oneLine.replaceAll("\\s+", " ");
 	}
 }

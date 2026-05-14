@@ -55,6 +55,25 @@ final class ColorLockSites
 		}
 	}
 
+	static String concatBasePath(String base, String path)
+	{
+		if (base == null || path == null)
+		{
+			return "";
+		}
+		String b = trimTrailingSlash(base.trim());
+		String p = path.trim();
+		if (b.isEmpty() || p.isEmpty())
+		{
+			return "";
+		}
+		if (!p.startsWith("/"))
+		{
+			p = "/" + p;
+		}
+		return b + p;
+	}
+
 	private static String trimTrailingSlash(String s)
 	{
 		int len = s.length();

@@ -30,6 +30,8 @@ public class ManifestStore
 	private volatile Map<Integer, ManifestItem> byId = Collections.emptyMap();
 	private volatile int manifestSchemaVersion = -1;
 	private volatile String loadError;
+	/** Absolute URL passed to {@link #loadBlocking}; used to detect hub items pointer changes without refetching. */
+	private volatile String lastLoadedManifestUrl;
 
 	/** After first successful load; used with payload CRC to spot silent manifest drift. */
 	private volatile int lastSnapshotItemCount = -1;
@@ -117,12 +119,18 @@ public class ManifestStore
 		return row != null && !row.getUsableColors().isEmpty();
 	}
 
-	public void downloadAsync(ColorLockConfig config, Runnable onClientThreadFinish)
+	public String lastLoadedManifestUrl()
 	{
+		return lastLoadedManifestUrl;
+	}
+
+	public void downloadAsync(Runnable onClientThreadFinish)
+	{
+		final String url = groupSync.getEffectiveItemsManifestUrl(config);
 		new Thread(() -> {
 			try
 			{
-				loadBlocking(config.itemsUrl());
+				loadBlocking(url);
 			}
 			catch (IOException e)
 			{
@@ -185,6 +193,7 @@ public class ManifestStore
 
 		byId = Collections.unmodifiableMap(next);
 		manifestSchemaVersion = schemaSeen == null ? -1 : schemaSeen;
+		lastLoadedManifestUrl = url;
 
 		boolean firstLoad = lastSnapshotItemCount < 0;
 		boolean drift = !firstLoad && crcVal != lastManifestPayloadCrc;

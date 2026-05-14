@@ -8,8 +8,11 @@ public final class ColorLockWeb
 {
 	public static final String HUB = "https://group.thegrandchart.com/";
 	public static final String ITEMS_PAGE = "https://group.thegrandchart.com/items";
-	/** Typical static manifest path for plugins (usableColors payloads). */
+	/** Typical static manifest path — used only to derive the hub origin. Live pulls use `/api/items` or `GET state.items.url`. */
 	public static final String DEFAULT_ITEMS_JSON = "https://group.thegrandchart.com/data/items.json";
+
+	public static final String API_PLUGIN_AUTH = "/api/plugin/v1/auth";
+	public static final String API_PLUGIN_STATE = "/api/plugin/v1/state";
 
 	/** Stored in older profiles; rewritten to {@link #DEFAULT_ITEMS_JSON} on plugin start when still present. */
 	public static final String LEGACY_VERCEL_ITEMS_JSON = "https://osrs-color-lock.vercel.app/data/items.json";
