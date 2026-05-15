@@ -6,6 +6,8 @@ import com.google.gson.annotations.SerializedName;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 
+import java.util.concurrent.ScheduledExecutorService;
+
 import net.runelite.client.callback.ClientThread;
 
 import java.io.BufferedReader;
@@ -13,33 +15,40 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
- * Group session: {@code POST /api/plugin/v1/auth} JWT, {@code GET /api/plugin/v1/state} roster/colors/items URL.
- * Fallback: {@code POST .../api/groups/{slug}/plugin-resolve} when auth path is unavailable (legacy hub).
+ * Group session: {@code POST /api/plugin/v1/auth} JWT, {@code GET /api/plugin/v1/state}, {@code PATCH /api/plugin/v1/me}.
+ * If {@code /auth} returns HTTP 404, tries stateless {@code POST /api/plugin/v1/resolve/{slug}} (JWT-less, per hub spec).
  */
 @Singleton
 public class ColorLockGroupSync
 {
 	private static final Gson GSON = new Gson();
-	private static final Logger log = Logger.getLogger(ColorLockGroupSync.class.getName());
+	private static final Logger log = LoggerFactory.getLogger(ColorLockGroupSync.class);
 
 	private static final int CONNECT_MS = 20_000;
 	private static final int READ_MS = 120_000;
 
 	private final ClientThread clientThread;
+	private final ScheduledExecutorService executor;
 	private final Object sessionLock = new Object();
 
 	/** Bearer from {@code /api/plugin/v1/auth}. */
@@ -49,28 +58,36 @@ public class ColorLockGroupSync
 	private volatile Integer lastPluginProfileRev;
 
 	private volatile String hubItemsManifestUrlOverride;
-
-	private volatile long hubPresentationEpoch;
+	private volatile Integer hubItemsSchemaVersionHint;
 
 	private volatile boolean resolvedOk;
 	private volatile ColorLockColor resolvedLock;
 	private volatile Set<String> resolvedGroupPaletteLowercase;
+	/** Last `/state` roster snapshot (empty list when unsynced). */
+	private volatile List<RosterMemberSnapshot> rosterSnapshot = Collections.emptyList();
+	/** Last group meta (slug, name, enabledColors) snapshot from /auth or /state. */
+	private volatile GroupSnapshot groupSnapshot;
+	/** Wall-clock millis of the last successful /state. 0 if never. */
+	private volatile long lastStateAtMs;
 	/** Last `/auth` http response (HTTP_OK on success, 401/403/404/-1 on failure). */
 	private volatile int lastAuthHttpStatus = 0;
+	/** Hub-provided `{error}` string from the most recent failed `/auth`, or {@code null}. */
+	private volatile String lastAuthErrorMessage;
 	/** Last `/state` http response (0 if never called this session). */
 	private volatile int lastStateHttpStatus = 0;
 	/** True when member.status came back as "active" on the most recent sync. */
 	private volatile boolean lastMemberActive = false;
 
 	@Inject
-	public ColorLockGroupSync(ClientThread clientThread)
+	public ColorLockGroupSync(ClientThread clientThread, ScheduledExecutorService executor)
 	{
 		this.clientThread = clientThread;
+		this.executor = executor;
 	}
 
 	/**
-	 * Items payload URL: hub {@code GET state.items.url} when authenticated, otherwise {@code {base}/api/items},
-	 * or static JSON fallback when base cannot be derived.
+	 * Items payload URL: hub-supplied {@code state.items.url} when present, otherwise the canonical
+	 * {@code {base}/api/v1/items}.
 	 */
 	public String getEffectiveItemsManifestUrl(ColorLockConfig config)
 	{
@@ -79,13 +96,41 @@ public class ColorLockGroupSync
 		{
 			return o.trim();
 		}
+		return getDefaultItemsManifestUrl();
+	}
+
+	/** Stable canonical URL ({@code {base}/api/v1/items}) ignoring any hub-supplied override. */
+	public String getDefaultItemsManifestUrl()
+	{
 		String base = ColorLockSites.deriveBaseSiteUrl(ColorLockWeb.DEFAULT_ITEMS_JSON);
-		String api = ColorLockSites.concatBasePath(base, "/api/items");
+		String api = ColorLockSites.concatBasePath(base, ColorLockWeb.API_V1_ITEMS);
 		if (!api.isEmpty())
 		{
 			return api;
 		}
 		return ColorLockWeb.DEFAULT_ITEMS_JSON;
+	}
+
+	/** Deprecated alias URL ({@code {base}/api/items}) — final manifest retry when versioned path fails. */
+	public String getLegacyItemsManifestUrl()
+	{
+		String base = ColorLockSites.deriveBaseSiteUrl(ColorLockWeb.DEFAULT_ITEMS_JSON);
+		String api = ColorLockSites.concatBasePath(base, ColorLockWeb.API_ITEMS_LEGACY);
+		if (!api.isEmpty())
+		{
+			return api;
+		}
+		return ColorLockWeb.DEFAULT_ITEMS_JSON;
+	}
+
+	/** Drops a broken/unreachable {@code state.items.url}; next manifest fetch will use the default. */
+	public void clearItemsUrlOverride()
+	{
+		if (hubItemsManifestUrlOverride != null)
+		{
+			log.warn("Dropping hub items.url override: {}", hubItemsManifestUrlOverride);
+			hubItemsManifestUrlOverride = null;
+		}
 	}
 
 	boolean hubOverridesManualAssignedColor(ColorLockConfig config)
@@ -99,14 +144,39 @@ public class ColorLockGroupSync
 		return resolvedLock;
 	}
 
-	long hubPresentationEpoch()
+	/** Nullable; {@code items.schemaVersion} from the last successful {@code GET /state}. */
+	public Integer getHubItemsSchemaVersionHint()
 	{
-		return hubPresentationEpoch;
+		return hubItemsSchemaVersionHint;
+	}
+
+	/** Last roster snapshot seen on /state. Empty list when unsynced or not yet polled. */
+	public List<RosterMemberSnapshot> getRosterSnapshot()
+	{
+		return rosterSnapshot;
+	}
+
+	/** Last group meta (slug, name, enabledColors). Null when never authed. */
+	public GroupSnapshot getGroupSnapshot()
+	{
+		return groupSnapshot;
+	}
+
+	/** Wall-clock ms of the most recent /state response, or 0. */
+	public long getLastStateAtMs()
+	{
+		return lastStateAtMs;
 	}
 
 	public int getLastAuthHttpStatus()
 	{
 		return lastAuthHttpStatus;
+	}
+
+	/** Hub-provided error string from the most recent failed `/auth`, or {@code null}. */
+	public String getLastAuthErrorMessage()
+	{
+		return lastAuthErrorMessage;
 	}
 
 	public int getLastStateHttpStatus()
@@ -195,19 +265,23 @@ public class ColorLockGroupSync
 	{
 		clearJwt();
 		hubItemsManifestUrlOverride = null;
+		hubItemsSchemaVersionHint = null;
 		lastPluginProfileRev = null;
 		resolvedOk = false;
 		resolvedLock = null;
 		resolvedGroupPaletteLowercase = null;
+		rosterSnapshot = Collections.emptyList();
+		groupSnapshot = null;
+		lastStateAtMs = 0L;
 		lastAuthHttpStatus = 0;
+		lastAuthErrorMessage = null;
 		lastStateHttpStatus = 0;
 		lastMemberActive = false;
-		touchHubPresentationEpoch();
 	}
 
 	void refreshAsync(ColorLockConfig config, Runnable onFinishClientThread)
 	{
-		new Thread(() -> {
+		executor.execute(() -> {
 			try
 			{
 				synchronized (sessionLock)
@@ -219,15 +293,15 @@ public class ColorLockGroupSync
 			{
 				clientThread.invokeLater(onFinishClientThread);
 			}
-		}, "osrs-color-lock-groupsync").start();
+		});
 	}
 
 	/**
-	 * Lightweight poll {@code GET /api/plugin/v1/state} while JWT fresh; refreshes JWT if needed (no legacy resolve).
+	 * Lightweight poll {@code GET /api/plugin/v1/state} while JWT fresh; refreshes JWT if needed.
 	 */
 	void pollStateAsync(ColorLockConfig config, Runnable onFinishClientThread)
 	{
-		new Thread(() -> {
+		executor.execute(() -> {
 			try
 			{
 				synchronized (sessionLock)
@@ -239,7 +313,7 @@ public class ColorLockGroupSync
 			{
 				clientThread.invokeLater(onFinishClientThread);
 			}
-		}, "osrs-color-lock-statepoll").start();
+		});
 	}
 
 	private void pollOrResyncBlocking(ColorLockConfig config)
@@ -282,7 +356,7 @@ public class ColorLockGroupSync
 		String base = ColorLockSites.deriveBaseSiteUrl(ColorLockWeb.DEFAULT_ITEMS_JSON);
 		if (base.isEmpty())
 		{
-			log.warning("Group sync skipped: hub base URL could not be derived");
+			log.warn("Group sync skipped: hub base URL could not be derived");
 			clearSession();
 			return;
 		}
@@ -295,7 +369,12 @@ public class ColorLockGroupSync
 		lastAuthHttpStatus = authRc;
 		if (authRc == HttpURLConnection.HTTP_NOT_FOUND)
 		{
-			doLegacyPluginResolveBlocking(base, slug, memberCode, jp);
+			if (postPluginResolveV1Blocking(base, slug, memberCode, jp))
+			{
+				return;
+			}
+			clearSession();
+			log.warn("plugin/v1/auth 404 and plugin/v1/resolve failed for slug {}", slug);
 			return;
 		}
 		if (authRc != HttpURLConnection.HTTP_OK || accessJwt == null || accessJwt.isEmpty())
@@ -303,7 +382,7 @@ public class ColorLockGroupSync
 			clearSession();
 			if (authRc > 0)
 			{
-				log.warning("plugin/v1/auth HTTP " + authRc + " for group slug " + slug);
+				log.warn("plugin/v1/auth HTTP {} for group slug {}", authRc, slug);
 			}
 			return;
 		}
@@ -321,7 +400,7 @@ public class ColorLockGroupSync
 				if (authRc != HttpURLConnection.HTTP_OK || jwtMissingOrExpired())
 				{
 					clearSession();
-					log.warning("plugin/v1/state 401 → re-auth failed for slug " + slug);
+					log.warn("plugin/v1/state 401 -> re-auth failed for slug {}", slug);
 					return;
 				}
 				retriedJwt = true;
@@ -329,7 +408,7 @@ public class ColorLockGroupSync
 			}
 			if (stateRc != HttpURLConnection.HTTP_OK)
 			{
-				log.warning("plugin/v1/state HTTP " + stateRc + " — using auth snapshot only");
+				log.warn("plugin/v1/state HTTP {} - using auth snapshot only", stateRc);
 			}
 			break;
 		}
@@ -351,10 +430,10 @@ public class ColorLockGroupSync
 			int rc = conn.getResponseCode();
 			if (rc != HttpURLConnection.HTTP_OK)
 			{
-				drainQuietly(conn.getErrorStream());
-				drainQuietly(conn.getInputStream());
+				lastAuthErrorMessage = readErrorMessageQuietly(conn);
 				return rc;
 			}
+			lastAuthErrorMessage = null;
 
 			try (BufferedReader reader = new BufferedReader(
 				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
@@ -376,7 +455,7 @@ public class ColorLockGroupSync
 		catch (IOException e)
 		{
 			clearJwt();
-			log.log(Level.WARNING, "plugin/v1/auth failed", e);
+			log.warn("plugin/v1/auth failed", e);
 			return -1;
 		}
 		finally
@@ -388,15 +467,17 @@ public class ColorLockGroupSync
 		}
 	}
 
-	private static String buildAuthJsonBody(String slug, String publicCode, String joinPasscode)
+	private static String buildAuthJsonBody(String slugOrUrl, String publicCode, String joinPasscode)
 	{
-		String escSlug = gsonEscape(slug == null ? "" : slug.trim());
 		String escCode = gsonEscape(publicCode == null ? "" : publicCode.trim());
 		StringBuilder sb = new StringBuilder(96);
 		sb.append("{\"publicCode\":\"").append(escCode).append("\"");
-		if (slug != null && !slug.trim().isEmpty())
+		String t = slugOrUrl == null ? "" : slugOrUrl.trim();
+		if (!t.isEmpty())
 		{
-			sb.append(",\"slug\":\"").append(escSlug).append("\"");
+			boolean looksLikeUrl = t.startsWith("http://") || t.startsWith("https://") || t.contains("/g/");
+			String field = looksLikeUrl ? "inviteUrl" : "slug";
+			sb.append(",\"").append(field).append("\":\"").append(gsonEscape(t)).append("\"");
 		}
 		if (joinPasscode != null && !joinPasscode.trim().isEmpty())
 		{
@@ -409,6 +490,243 @@ public class ColorLockGroupSync
 	private static String gsonEscape(String s)
 	{
 		return s.replace("\\", "\\\\").replace("\"", "\\\"");
+	}
+
+	/**
+	 * Heartbeat / sync-toggle relay; optional completion on the client thread.
+	 *
+	 * @see #patchMeAsync(ColorLockConfig, String, boolean, String, Boolean, Runnable)
+	 */
+	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
+		String currentColorKey, Runnable onFinishClientThread)
+	{
+		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, onFinishClientThread);
+	}
+
+	/**
+	 * Best-effort heartbeat: PATCH /api/plugin/v1/me with {@code runescapeUsername} (required),
+	 * {@code presence.online}, and {@code currentColor} (effective plugin color, lowercase key).
+	 * Pass {@code syncToggleEnabled} non-null to report a plugin sync toggle event ({@code sync.enabled}).
+	 * Skips silently when JWT missing/expired or {@code runescapeName} is empty.
+	 */
+	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
+		String currentColorKey, Boolean syncToggleEnabled, Runnable onFinishClientThread)
+	{
+		executor.execute(() -> {
+			try
+			{
+				synchronized (sessionLock)
+				{
+					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled);
+				}
+			}
+			finally
+			{
+				clientThread.invokeLater(() -> {
+					if (onFinishClientThread != null)
+					{
+						onFinishClientThread.run();
+					}
+				});
+			}
+		});
+	}
+
+	/** Hub-validated runescapeUsername: 1-12 chars, [A-Za-z0-9 _-]. */
+	private static final java.util.regex.Pattern RSN_PATTERN =
+		java.util.regex.Pattern.compile("^[A-Za-z0-9 _-]+$");
+
+	/**
+	 * RuneLite returns the local player's display name with the non-breaking space
+	 * character (U+00A0) in place of a regular space, plus stray whitespace at edges.
+	 * Normalise to plain ASCII so the hub's {@code ^[A-Za-z0-9 _-]{1,12}$} regex matches.
+	 */
+	private static String normalizeRunescapeName(String raw)
+	{
+		if (raw == null)
+		{
+			return "";
+		}
+		return raw.replace('\u00A0', ' ').trim();
+	}
+
+	private int patchMeBlocking(ColorLockConfig config, String runescapeName, boolean presenceOnline,
+		String currentColorKey, Boolean syncToggleEnabled)
+	{
+		boolean isSyncToggleEvent = syncToggleEnabled != null;
+		if (config == null)
+		{
+			log.info("Heartbeat skipped: config not initialised.");
+			return -1;
+		}
+		// Regular heartbeats stop firing as soon as the user unchecks. The one-shot
+		// sync.enabled=false PATCH must still go out so the hub records the toggle and clears
+		// our "Online" flag, so we only short-circuit when there's no explicit toggle event.
+		if (!config.hubGroupSyncEnabled() && !isSyncToggleEvent)
+		{
+			log.info("Heartbeat skipped: hub sync disabled.");
+			return -1;
+		}
+		if (jwtMissingOrExpired())
+		{
+			log.info("Heartbeat skipped: JWT missing or expired (sync first).");
+			return HttpURLConnection.HTTP_UNAUTHORIZED;
+		}
+		String clean = normalizeRunescapeName(runescapeName);
+		if (clean.isEmpty())
+		{
+			log.info("Heartbeat skipped: no in-game player name yet.");
+			return -1;
+		}
+		if (clean.length() > 12 || !RSN_PATTERN.matcher(clean).matches())
+		{
+			log.info("Heartbeat skipped: in-game player name '{}' (raw '{}') fails hub validation (1-12 chars, [A-Za-z0-9 _-]).",
+				clean, runescapeName);
+			return -1;
+		}
+		String base = ColorLockSites.deriveBaseSiteUrl(ColorLockWeb.DEFAULT_ITEMS_JSON);
+		if (base.isEmpty())
+		{
+			log.warn("Heartbeat skipped: hub base URL could not be derived.");
+			return -1;
+		}
+		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_ME);
+		StringBuilder bodySb = new StringBuilder(160)
+			.append("{\"runescapeUsername\":\"").append(gsonEscape(clean))
+			.append("\",\"presence\":{\"online\":").append(presenceOnline).append("}");
+		if (currentColorKey != null && !currentColorKey.isBlank())
+		{
+			String cur = currentColorKey.trim().toLowerCase(Locale.ENGLISH);
+			bodySb.append(",\"currentColor\":\"").append(gsonEscape(cur)).append("\"");
+		}
+		if (syncToggleEnabled != null)
+		{
+			bodySb.append(",\"sync\":{\"enabled\":").append(syncToggleEnabled.booleanValue()).append("}");
+		}
+		bodySb.append("}");
+		String body = bodySb.toString();
+
+		// JDK HttpURLConnection rejects PATCH (ProtocolException). Use java.net.http.HttpClient instead.
+		HttpClient client = HttpClient.newBuilder()
+			.connectTimeout(Duration.ofMillis(CONNECT_MS))
+			.build();
+		HttpRequest req = HttpRequest.newBuilder()
+			.uri(URI.create(uri))
+			.timeout(Duration.ofMillis(READ_MS))
+			.header("Content-Type", "application/json; charset=utf-8")
+			.header("Accept", "application/json")
+			.header("Authorization", "Bearer " + accessJwt)
+			.header("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)")
+			.method("PATCH", HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+			.build();
+		try
+		{
+			HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+			int rc = resp.statusCode();
+			if (rc == HttpURLConnection.HTTP_UNAUTHORIZED)
+			{
+				clearJwt();
+			}
+			if (rc != HttpURLConnection.HTTP_OK && rc != HttpURLConnection.HTTP_NO_CONTENT)
+			{
+				log.warn("plugin/v1/me PATCH HTTP {} for {} body={}", rc, clean, truncateForLog(resp.body()));
+			}
+			else
+			{
+				log.info("plugin/v1/me PATCH HTTP {} for {} ({})", rc, clean,
+					presenceOnline ? "online" : "offline");
+			}
+			return rc;
+		}
+		catch (IOException | InterruptedException e)
+		{
+			if (e instanceof InterruptedException)
+			{
+				Thread.currentThread().interrupt();
+			}
+			log.warn("plugin/v1/me PATCH failed", e);
+			return -1;
+		}
+	}
+
+	private static String truncateForLog(String s)
+	{
+		if (s == null)
+		{
+			return "";
+		}
+		return s.length() > 240 ? s.substring(0, 240) + "…" : s;
+	}
+
+	/**
+	 * Hub state.items.url comes through unverified. Resolve relative paths against {@code base},
+	 * reject loopback / private / file URLs, and drop anything we can't reach.
+	 */
+	static String normalizeItemsUrl(String raw, String base)
+	{
+		if (raw == null)
+		{
+			return null;
+		}
+		String t = raw.trim();
+		if (t.isEmpty())
+		{
+			return null;
+		}
+		String resolved = t;
+		if (t.startsWith("/"))
+		{
+			resolved = ColorLockSites.concatBasePath(base, t);
+		}
+		try
+		{
+			URI u = URI.create(resolved);
+			String scheme = u.getScheme();
+			if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https")))
+			{
+				log.warn("Ignoring hub items.url scheme: {}", resolved);
+				return null;
+			}
+			String host = u.getHost();
+			if (host == null || host.isEmpty())
+			{
+				log.warn("Ignoring hub items.url missing host: {}", resolved);
+				return null;
+			}
+			String h = host.toLowerCase(Locale.ENGLISH);
+			boolean unreachableHost = h.equals("localhost") || h.equals("127.0.0.1") || h.equals("::1")
+				|| h.startsWith("10.") || h.startsWith("192.168.")
+				|| (h.startsWith("172.") && in172_16_thru_31(h));
+			if (unreachableHost)
+			{
+				log.warn("Ignoring hub items.url pointing at non-public host: {}", resolved);
+				return null;
+			}
+			return resolved;
+		}
+		catch (IllegalArgumentException e)
+		{
+			log.warn("Ignoring malformed hub items.url: {}", resolved);
+			return null;
+		}
+	}
+
+	private static boolean in172_16_thru_31(String host)
+	{
+		int dot1 = host.indexOf('.', 4);
+		if (dot1 < 0)
+		{
+			return false;
+		}
+		try
+		{
+			int second = Integer.parseInt(host.substring(4, dot1));
+			return second >= 16 && second <= 31;
+		}
+		catch (NumberFormatException e)
+		{
+			return false;
+		}
 	}
 
 	private int fetchPluginStateAndApplyBlocking(String base)
@@ -448,13 +766,16 @@ public class ColorLockGroupSync
 					return rc;
 				}
 				String itemsUrl = state.items != null && state.items.url != null ? state.items.url.trim() : null;
-				applyGroupAndMember(state.group, state.member, itemsUrl);
+				hubItemsSchemaVersionHint = state.items != null ? state.items.schemaVersion : null;
+				applyGroupAndMember(state.group, state.member, normalizeItemsUrl(itemsUrl, base));
+				captureRosterAndGroupSnapshot(state);
+				lastStateAtMs = System.currentTimeMillis();
 			}
 			return HttpURLConnection.HTTP_OK;
 		}
 		catch (IOException e)
 		{
-			log.log(Level.FINE, "plugin/v1/state failed", e);
+			log.debug("plugin/v1/state failed", e);
 			return -1;
 		}
 		finally
@@ -476,69 +797,61 @@ public class ColorLockGroupSync
 		Integer prev = lastPluginProfileRev;
 		if (prev != null && rev > prev)
 		{
-			log.info(() -> "Group hub pluginProfileRev " + prev + " → " + rev + " — assignedColor may have changed.");
+			log.info("Group hub pluginProfileRev {} -> {} - assignedColor may have changed.", prev, rev);
 		}
 		lastPluginProfileRev = rev;
 	}
 
 	private void applyGroupAndMember(GroupDto group, MemberDto member, String itemsUrlAbsolute)
 	{
-		try
+		if (group != null)
 		{
-			if (member == null)
-			{
-				resolvedOk = false;
-				resolvedLock = null;
-				resolvedGroupPaletteLowercase = null;
-				log.warning("Hub response missing member payload");
-				return;
-			}
-
-			boolean activeMember = member.status == null
-				|| "active".equalsIgnoreCase(member.status.trim());
-			lastMemberActive = activeMember;
-			if (!activeMember)
-			{
-				hubItemsManifestUrlOverride = null;
-				resolvedGroupPaletteLowercase = null;
-				resolvedOk = false;
-				resolvedLock = null;
-				log.info("Hub member status is not active — color lock fallback to plugin assignment.");
-				return;
-			}
-
-			resolvedGroupPaletteLowercase = deriveGroupPaletteIntersect(group);
-
-			if (itemsUrlAbsolute != null && !itemsUrlAbsolute.isBlank())
-			{
-				hubItemsManifestUrlOverride = itemsUrlAbsolute.trim();
-			}
-
-			resolvedOk = true;
-			resolvedLock = ColorLockColor.fromPaletteKey(member.assignedColor);
-
-			if (member.pluginProfileRev != null)
-			{
-				noteRev(member.pluginProfileRev);
-			}
-			if (resolvedLock != null)
-			{
-				log.info(() -> "Hub assigned your color-lock to " + resolvedLock.getKey() + " (slug + member code matched the hub).");
-			}
-			else
-			{
-				log.info("Synced with hub: no assigned color yet — Your color lock in settings still applies until the hub assigns one.");
-			}
+			groupSnapshot = new GroupSnapshot(group.slug, group.name, group.enabledColors);
 		}
-		finally
+		if (member == null)
 		{
-			touchHubPresentationEpoch();
+			resolvedOk = false;
+			resolvedLock = null;
+			resolvedGroupPaletteLowercase = null;
+			log.warn("Hub response missing member payload");
+			return;
 		}
-	}
 
-	private void touchHubPresentationEpoch()
-	{
-		hubPresentationEpoch++;
+		boolean activeMember = member.status == null
+			|| "active".equalsIgnoreCase(member.status.trim());
+		lastMemberActive = activeMember;
+		if (!activeMember)
+		{
+			hubItemsManifestUrlOverride = null;
+			resolvedGroupPaletteLowercase = null;
+			resolvedOk = false;
+			resolvedLock = null;
+			log.info("Hub member status is not active - color lock fallback to plugin assignment.");
+			return;
+		}
+
+		resolvedGroupPaletteLowercase = deriveGroupPaletteIntersect(group);
+
+		if (itemsUrlAbsolute != null && !itemsUrlAbsolute.isBlank())
+		{
+			hubItemsManifestUrlOverride = itemsUrlAbsolute.trim();
+		}
+
+		resolvedOk = true;
+		resolvedLock = ColorLockColor.fromPaletteKey(member.assignedColor);
+
+		if (member.pluginProfileRev != null)
+		{
+			noteRev(member.pluginProfileRev);
+		}
+		if (resolvedLock != null)
+		{
+			log.info("Hub assigned your color-lock to {} (slug + member code matched the hub).", resolvedLock.getKey());
+		}
+		else
+		{
+			log.info("Synced with hub: no assigned color yet - Your color lock in settings still applies until the hub assigns one.");
+		}
 	}
 
 	private static Set<String> deriveGroupPaletteIntersect(GroupDto group)
@@ -581,18 +894,46 @@ public class ColorLockGroupSync
 		return Collections.unmodifiableSet(expanded);
 	}
 
-	private void doLegacyPluginResolveBlocking(String base, String slug, String memberCode, String jpRaw)
+	/** Build a read-only roster snapshot for UI consumption (skips kicked rows). */
+	private void captureRosterAndGroupSnapshot(PluginStateResp state)
+	{
+		if (state == null)
+		{
+			return;
+		}
+		List<RosterMemberSnapshot> out;
+		if (state.roster == null || state.roster.isEmpty())
+		{
+			out = Collections.emptyList();
+		}
+		else
+		{
+			List<RosterMemberSnapshot> tmp = new ArrayList<>(state.roster.size());
+			for (RosterRowDto r : state.roster)
+			{
+				if (r == null)
+				{
+					continue;
+				}
+				tmp.add(new RosterMemberSnapshot(r));
+			}
+			out = Collections.unmodifiableList(tmp);
+		}
+		rosterSnapshot = out;
+	}
+
+	/** Stateless JWT-less resolve ({@link ColorLockWeb#API_PLUGIN_RESOLVE_V1}) when {@code /auth} returns 404. */
+	private boolean postPluginResolveV1Blocking(String base, String slug, String memberCode, String jpRaw)
 	{
 		String encodedSlug = URLEncoder.encode(slug, StandardCharsets.UTF_8).replace("+", "%20");
+		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_RESOLVE_V1 + encodedSlug);
+		HttpURLConnection conn = null;
 		try
 		{
-			String uri = ColorLockSites.concatBasePath(base, "/api/groups/" + encodedSlug + "/plugin-resolve");
-			HttpURLConnection conn = openJsonPost(uri);
-			OutputStreamWriter w = new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8);
-			try
+			conn = openJsonPost(uri);
+			try (OutputStreamWriter w = new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8))
 			{
-				boolean sendPasscode = jpRaw != null && !jpRaw.isEmpty();
-				if (sendPasscode)
+				if (jpRaw != null && !jpRaw.isEmpty())
 				{
 					w.write(GSON.toJson(new ResolveBody(memberCode, jpRaw)));
 				}
@@ -601,37 +942,34 @@ public class ColorLockGroupSync
 					w.write(GSON.toJson(new ResolveBodyOnlyCode(memberCode)));
 				}
 			}
-			finally
-			{
-				w.flush();
-				w.close();
-			}
 
 			int rc = conn.getResponseCode();
 			if (rc != HttpURLConnection.HTTP_OK)
 			{
-				clearSession();
 				drainQuietly(conn.getErrorStream());
-				conn.disconnect();
-				log.warning("plugin-resolve HTTP " + rc + " (legacy fallback) slug " + slug);
-				return;
+				log.warn("plugin/v1/resolve HTTP {} for slug {}", rc, slug);
+				return false;
 			}
 
 			try (BufferedReader reader = new BufferedReader(
 				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
 			{
-				LegacyResolveResponse resp = GSON.fromJson(reader, LegacyResolveResponse.class);
+				StatelessResolveResponse resp = GSON.fromJson(reader, StatelessResolveResponse.class);
 				applyGroupAndMember(resp != null ? resp.group : null, resp != null ? resp.member : null, null);
 			}
-			finally
-			{
-				conn.disconnect();
-			}
+			return true;
 		}
 		catch (IOException e)
 		{
-			clearSession();
-			log.log(Level.WARNING, "legacy plugin-resolve failed", e);
+			log.warn("plugin/v1/resolve failed for slug {}", slug, e);
+			return false;
+		}
+		finally
+		{
+			if (conn != null)
+			{
+				conn.disconnect();
+			}
 		}
 	}
 
@@ -649,6 +987,51 @@ public class ColorLockGroupSync
 		conn.setRequestProperty("User-Agent",
 			"osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)");
 		return conn;
+	}
+
+	/** Reads error-stream body and pulls out the hub-supplied {@code {error}} string; returns {@code null} on miss. */
+	private static String readErrorMessageQuietly(HttpURLConnection conn)
+	{
+		InputStream es = conn.getErrorStream();
+		if (es == null)
+		{
+			return null;
+		}
+		try (BufferedReader reader = new BufferedReader(new java.io.InputStreamReader(es, StandardCharsets.UTF_8)))
+		{
+			StringBuilder sb = new StringBuilder(160);
+			char[] buf = new char[256];
+			int read;
+			while (sb.length() < 1024 && (read = reader.read(buf)) > 0)
+			{
+				sb.append(buf, 0, read);
+			}
+			String body = sb.toString().trim();
+			if (body.isEmpty())
+			{
+				return null;
+			}
+			try
+			{
+				com.google.gson.JsonObject obj = GSON.fromJson(body, com.google.gson.JsonObject.class);
+				if (obj != null && obj.has("error") && obj.get("error").isJsonPrimitive())
+				{
+					String e = obj.get("error").getAsString();
+					if (e != null && !e.isBlank())
+					{
+						return e.trim();
+					}
+				}
+			}
+			catch (Exception ignored)
+			{
+			}
+			return body.length() > 240 ? body.substring(0, 240) : body;
+		}
+		catch (IOException ignored)
+		{
+			return null;
+		}
 	}
 
 	private static void drainQuietly(InputStream in)
@@ -689,6 +1072,21 @@ public class ColorLockGroupSync
 		Number pluginProfileRev;
 	}
 
+	static final class RosterRowDto
+	{
+		String id;
+		String displayName;
+		String assignedColor;
+		String role;
+		String status;
+		Boolean presenceOnline;
+		String presenceSummary;
+		Boolean pluginSyncEnabled;
+		String pluginSyncDisplay;
+		String pluginCurrentColor;
+		Boolean pluginSyncCaution;
+	}
+
 	static final class PluginAuthResp
 	{
 		String accessToken;
@@ -702,6 +1100,7 @@ public class ColorLockGroupSync
 	static final class ItemsPointerDto
 	{
 		String url;
+		Integer schemaVersion;
 	}
 
 	static final class PluginStateResp
@@ -710,6 +1109,46 @@ public class ColorLockGroupSync
 		MemberDto member;
 
 		ItemsPointerDto items;
+		List<RosterRowDto> roster;
+	}
+
+	/** Read-only snapshot of one roster member as last seen on /state. Safe to share to Swing. */
+	public static final class RosterMemberSnapshot
+	{
+		public final String id;
+		public final String displayName;
+		public final String assignedColorKey;
+		public final String role;
+		public final String status;
+		public final boolean presenceOnline;
+		public final String presenceSummary;
+		public final boolean pluginSyncEnabled;
+		public final String pluginSyncDisplay;
+		public final String pluginCurrentColorKey;
+		public final boolean pluginSyncCaution;
+
+		RosterMemberSnapshot(RosterRowDto r)
+		{
+			this.id = r.id == null ? "" : r.id;
+			this.displayName = r.displayName == null ? "" : r.displayName;
+			this.assignedColorKey = r.assignedColor == null ? null : r.assignedColor.toLowerCase(Locale.ENGLISH);
+			this.role = r.role == null ? "member" : r.role;
+			this.status = r.status == null ? "active" : r.status;
+			this.presenceOnline = Boolean.TRUE.equals(r.presenceOnline);
+			this.presenceSummary = r.presenceSummary == null ? "" : r.presenceSummary;
+			this.pluginSyncEnabled = Boolean.TRUE.equals(r.pluginSyncEnabled);
+			this.pluginSyncDisplay = r.pluginSyncDisplay == null ? "—" : r.pluginSyncDisplay;
+			this.pluginCurrentColorKey = r.pluginCurrentColor == null ? null
+				: r.pluginCurrentColor.toLowerCase(Locale.ENGLISH);
+			this.pluginSyncCaution = Boolean.TRUE.equals(r.pluginSyncCaution);
+		}
+	}
+
+	/** Response body from {@link ColorLockWeb#API_PLUGIN_RESOLVE_V1} — same shapes as embedded {@code group}/{@code member} from {@code /auth}. */
+	static final class StatelessResolveResponse
+	{
+		MemberDto member;
+		GroupDto group;
 	}
 
 	static final class ResolveBodyOnlyCode
@@ -734,9 +1173,30 @@ public class ColorLockGroupSync
 		}
 	}
 
-	static final class LegacyResolveResponse
+	/** Read-only snapshot of group meta last seen on /state or /auth. */
+	public static final class GroupSnapshot
 	{
-		MemberDto member;
-		GroupDto group;
+		public final String slug;
+		public final String name;
+		public final List<String> enabledColorsLowercase;
+
+		GroupSnapshot(String slug, String name, List<String> enabled)
+		{
+			this.slug = slug == null ? "" : slug;
+			this.name = name == null ? "" : name;
+			List<String> out = new ArrayList<>();
+			if (enabled != null)
+			{
+				for (String c : enabled)
+				{
+					if (c != null && !c.isBlank())
+					{
+						out.add(c.trim().toLowerCase(Locale.ENGLISH));
+					}
+				}
+			}
+			this.enabledColorsLowercase = Collections.unmodifiableList(out);
+		}
 	}
+
 }

@@ -9,13 +9,14 @@ import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.inject.Inject;
 import javax.inject.Provider;
@@ -34,6 +35,8 @@ import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.ChatMessageType;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.chat.ChatColorType;
+import net.runelite.client.chat.ChatMessageBuilder;
 import net.runelite.client.chat.ChatMessageManager;
 import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.config.ConfigManager;
@@ -46,8 +49,6 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
-import net.runelite.client.util.Text;
-
 @PluginDescriptor(
 	name = "Color Locked",
 	description = "Group Iron color-lock: hub rules, menu blocking, red marks, and item lookup.",
@@ -55,29 +56,36 @@ import net.runelite.client.util.Text;
 )
 public class ColorLockPlugin extends Plugin
 {
-	private static final Logger log = Logger.getLogger(ColorLockPlugin.class.getName());
+	private static final Logger log = LoggerFactory.getLogger(ColorLockPlugin.class);
 
 	static final int EXPECTED_SCHEMA_VERSION = 2;
+
+	private static final java.util.Set<String> HUB_CRED_KEYS = java.util.Set.of(
+		"groupSlug", "groupJoinPasscode", "memberPublicCode");
+
+	/**
+	 * RuneLite replays the active profile by re-firing {@code ConfigChanged} for every key on
+	 * plugin startup / profile activation. Ignore credential-key change events for this many ms
+	 * after {@link #startUp()} so we don't auto-disable sync from a profile-replay event the
+	 * user never triggered.
+	 */
+	private static final long CRED_CHANGE_GRACE_MS = 2_500L;
 
 	/** Fixed background interval for manifest refresh (no config UI). */
 	private static final int MANIFEST_REFRESH_INTERVAL_MINUTES = 60;
 
-	private void migrateLegacyItemsUrlIfNeeded()
-	{
-		String configured = configManager.getConfiguration("colorlockhelper", "itemsUrl");
-		if (!ColorLockWeb.shouldMigrateLegacyVercelItemsUrl(configured))
-		{
-			return;
-		}
-		configManager.setConfiguration("colorlockhelper", "itemsUrl", ColorLockWeb.DEFAULT_ITEMS_JSON);
-		log.info("Updated stored items URL from legacy osrs-color-lock.vercel.app to " + ColorLockWeb.DEFAULT_ITEMS_JSON);
-	}
+	/** Presence heartbeat to PATCH /api/plugin/v1/me; hub considers a member stale after ~180s. */
+	private static final int ME_HEARTBEAT_INTERVAL_SECONDS = 60;
 
-	private void unsetLegacySyncDropdownKeyIfPresent()
+	/** Strip config keys we no longer expose so old profiles don't carry stale state. */
+	private void purgeDeprecatedConfigKeys()
 	{
-		if (configManager.getConfiguration("colorlockhelper", "syncToGroupAction") != null)
+		for (String key : new String[]{"itemsUrl", "syncToGroupAction"})
 		{
-			configManager.unsetConfiguration("colorlockhelper", "syncToGroupAction");
+			if (configManager.getConfiguration("colorlockhelper", key) != null)
+			{
+				configManager.unsetConfiguration("colorlockhelper", key);
+			}
 		}
 	}
 
@@ -115,17 +123,30 @@ public class ColorLockPlugin extends Plugin
 	private ChatMessageManager chatMessageManager;
 
 	@Inject
+	private ScheduledExecutorService scheduledExecutor;
+
+	@Inject
 	private Provider<ColorLockLookupPanel> lookupPanelProvider;
 
 	private NavigationButton lookupNavButton;
 
-	private static final long LOGIN_REFRESH_DEBOUNCE_MS = 90_000L;
+	private static final long LOGIN_REFRESH_DEBOUNCE_MS = 10_000L;
+	private static final long SETTINGS_OPEN_RESYNC_DEBOUNCE_MS = 30_000L;
 
-	private ScheduledExecutorService refreshScheduler;
 	private ScheduledFuture<?> scheduledManifestRefresh;
+	private ScheduledFuture<?> scheduledMeHeartbeat;
 	private volatile long lastDebouncedRefreshMs;
-	private long lastSeenHubPresentationEpochInSettingsUi = Long.MIN_VALUE;
-	private long lastMuteSwingMs;
+	private volatile long lastSettingsOpenResyncMs;
+	private volatile boolean settingsPanelOpenLastTick;
+	/** Non-null when the user just toggled hub sync; consumed by the next heartbeat to inform the hub. */
+	private volatile Boolean pendingSyncToggle;
+	/**
+	 * Wall-clock millis after which {@link #onConfigChanged} will react to credential-key edits.
+	 * Set in {@link #startUp()} to {@code now + CRED_CHANGE_GRACE_MS} to swallow RuneLite's
+	 * profile-replay events.
+	 */
+	private volatile long credChangeArmedAtMs;
+	private Timer settingsMuteTimer;
 
 	@Provides
 	ColorLockConfig provideConfig(ConfigManager configManager)
@@ -136,8 +157,8 @@ public class ColorLockPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		migrateLegacyItemsUrlIfNeeded();
-		unsetLegacySyncDropdownKeyIfPresent();
+		credChangeArmedAtMs = System.currentTimeMillis() + CRED_CHANGE_GRACE_MS;
+		purgeDeprecatedConfigKeys();
 		overlayManager.add(itemOverlay);
 		lookupNavButton = NavigationButton.builder()
 			.tooltip("Color Locked lookup")
@@ -147,8 +168,15 @@ public class ColorLockPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(lookupNavButton);
 		kickoffFetch();
-		lastDebouncedRefreshMs = System.currentTimeMillis();
+		lastDebouncedRefreshMs = 0L;
 		schedulePeriodicManifestRefresh();
+		schedulePeriodicMeHeartbeat();
+		startSettingsMuteTimer();
+		if (config.hubGroupSyncEnabled() && hubCredentialsFilled(config)
+			&& client.getGameState() == GameState.LOGGED_IN)
+		{
+			runLoginVerification();
+		}
 	}
 
 	private ColorLockColor assignment()
@@ -166,10 +194,38 @@ public class ColorLockPlugin extends Plugin
 			lookupNavButton = null;
 		}
 		cancelPeriodicManifestRefresh();
-		if (refreshScheduler != null)
+		cancelPeriodicMeHeartbeat();
+		stopSettingsMuteTimer();
+		sendPresenceOfflineBestEffort();
+	}
+
+	private void startSettingsMuteTimer()
+	{
+		if (GraphicsEnvironment.isHeadless())
 		{
-			refreshScheduler.shutdown();
-			refreshScheduler = null;
+			return;
+		}
+		stopSettingsMuteTimer();
+		settingsMuteTimer = new Timer(500, e -> {
+			boolean mute = groupSync.hubOverridesManualAssignedColor(config);
+			boolean panelOpen = applyAssignedColorRowMuteInConfigPanels(mute);
+			boolean wasOpen = settingsPanelOpenLastTick;
+			settingsPanelOpenLastTick = panelOpen;
+			if (panelOpen && !wasOpen)
+			{
+				maybeResyncOnSettingsOpened();
+			}
+		});
+		settingsMuteTimer.setRepeats(true);
+		settingsMuteTimer.start();
+	}
+
+	private void stopSettingsMuteTimer()
+	{
+		if (settingsMuteTimer != null)
+		{
+			settingsMuteTimer.stop();
+			settingsMuteTimer = null;
 		}
 	}
 
@@ -181,26 +237,49 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		String key = evt.getKey();
+		if (HUB_CRED_KEYS.contains(key))
+		{
+			if (System.currentTimeMillis() < credChangeArmedAtMs)
+			{
+				log.debug("Ignoring credential-key replay during startup grace: {}", key);
+				return;
+			}
+			if (config.hubGroupSyncEnabled())
+			{
+				SwingUtilities.invokeLater(() ->
+					configManager.setConfiguration(evt.getGroup(), "hubGroupSyncEnabled", Boolean.FALSE.toString()));
+				groupSync.clearHubSessionBlocking();
+				postChatBanner("Color Locked: credentials changed - sync disabled. Re-check Sync with group to re-auth.");
+			}
+			return;
+		}
 		if ("hubGroupSyncEnabled".equals(key))
 		{
 			boolean on = parseConfigBoolean(evt.getNewValue());
 			if (on)
 			{
-				if (!groupSlugAndMemberCodeFilled(config))
+				if (!hubCredentialsFilled(config))
 				{
-					log.warning("Sync with group needs non-empty Group code and Member code. Checkbox turned off.");
+					log.warn("Sync needs Group code and Member code. Checkbox turned off.");
 					SwingUtilities.invokeLater(() ->
 						configManager.setConfiguration(evt.getGroup(), key, Boolean.FALSE.toString()));
 					groupSync.clearHubSessionBlocking();
+					postChatBanner("Color Locked: enter Group code and Member code before enabling sync (Group password only if the group has one).");
 					return;
 				}
+				pendingSyncToggle = Boolean.TRUE;
 				runOneShotHubSyncThenManifestAndMirror();
 			}
 			else
 			{
-				groupSync.clearHubSessionBlocking();
+				// Fire-and-forget the sync.enabled=false PATCH first, then clear the JWT in the
+				// callback so the executor thread still has a valid token to authenticate with.
+				reportSyncDisabledToHubBestEffort(() -> {
+					groupSync.clearHubSessionBlocking();
+					pendingSyncToggle = null;
+				});
+				postChatBanner("Color Locked: sync disabled. Manual color-lock is in effect.");
 			}
-			lastSeenHubPresentationEpochInSettingsUi = Long.MIN_VALUE;
 			return;
 		}
 		kickoffFetch();
@@ -226,8 +305,8 @@ public class ColorLockPlugin extends Plugin
 			}
 			lastDebouncedRefreshMs = now;
 		}
-		manifestStore.downloadAsync(this::validateSchemaQuietly);
-		if (config.hubGroupSyncEnabled() && groupSlugAndMemberCodeFilled(config))
+		kickoffFetch();
+		if (config.hubGroupSyncEnabled() && hubCredentialsFilled(config))
 		{
 			runLoginVerification();
 		}
@@ -237,7 +316,6 @@ public class ColorLockPlugin extends Plugin
 	public void onMenuEntryAdded(MenuEntryAdded event)
 	{
 		MenuEntry e = event.getMenuEntry();
-		plainListedEntry(e);
 		if (manifestStore.itemCount() == 0)
 		{
 			return;
@@ -247,6 +325,7 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		// Left-click default skips deprioritized ops; right-click list still stripped each frame.
+		// Tags on target text are preserved so native OSRS color highlighting stays intact.
 		e.setDeprioritized(true);
 	}
 
@@ -277,7 +356,6 @@ public class ColorLockPlugin extends Plugin
 	@Subscribe
 	public void onClientTick(ClientTick tick)
 	{
-		maybeRefreshAssignedColorRowGreyState();
 		if (manifestStore.itemCount() == 0)
 		{
 			return;
@@ -289,74 +367,14 @@ public class ColorLockPlugin extends Plugin
 		stripOpenMenu();
 	}
 
-	/** Plain labels + strip restricted verbs from the live menu (submenus included). */
+	/** Strip restricted verbs from the live menu (submenus included). Tags on names are preserved. */
 	private void stripOpenMenu()
 	{
 		if (manifestStore.itemCount() == 0 || !client.isMenuOpen())
 		{
 			return;
 		}
-		Menu root = client.getMenu();
-		plainMenuLevel(root);
-		stripMenuLevel(root);
-	}
-
-	private void plainMenuLevel(Menu menu)
-	{
-		if (menu == null)
-		{
-			return;
-		}
-		MenuEntry[] entries = menu.getMenuEntries();
-		if (entries == null || entries.length == 0)
-		{
-			return;
-		}
-		for (MenuEntry e : entries)
-		{
-			Menu sub = e.getSubMenu();
-			if (sub != null)
-			{
-				plainMenuLevel(sub);
-			}
-		}
-		entries = menu.getMenuEntries();
-		if (entries == null || entries.length == 0)
-		{
-			return;
-		}
-		for (MenuEntry e : entries)
-		{
-			plainListedEntry(e);
-		}
-	}
-
-	private void plainListedEntry(MenuEntry e)
-	{
-		if (manifestStore.itemCount() == 0)
-		{
-			return;
-		}
-		int itemId = ColorLockItemIdResolver.resolve(e, client);
-		if (itemId <= 0)
-		{
-			return;
-		}
-		ManifestItem row = manifestStore.getListedManifestItem(itemId, itemManager);
-		if (row == null || row.getUsableColors().isEmpty() || !ManifestRules.isLockEnforced(row))
-		{
-			return;
-		}
-		String target = e.getTarget();
-		if (target != null && target.indexOf('<') >= 0)
-		{
-			e.setTarget(Text.removeTags(target));
-		}
-		String opt = e.getOption();
-		if (opt != null && opt.indexOf('<') >= 0)
-		{
-			e.setOption(Text.removeTags(opt));
-		}
+		stripMenuLevel(client.getMenu());
 	}
 
 	private void stripMenuLevel(Menu menu)
@@ -386,7 +404,7 @@ public class ColorLockPlugin extends Plugin
 		List<MenuEntry> remove = new ArrayList<>();
 		for (MenuEntry e : entries)
 		{
-			if (shouldStripUseMenuEntry(e))
+			if (restrictUseMenuEntry(e))
 			{
 				remove.add(e);
 			}
@@ -453,44 +471,16 @@ public class ColorLockPlugin extends Plugin
 		return manifestStore.isRestrictedForAssignment(itemId, assignment(), itemManager);
 	}
 
-	private boolean shouldStripUseMenuEntry(MenuEntry e)
-	{
-		return restrictUseMenuEntry(e);
-	}
-
-	private void kickoffRemoteRefreshCycle()
-	{
-		if (GraphicsEnvironment.isHeadless())
-		{
-			return;
-		}
-		manifestStore.downloadAsync(() -> validateSchemaQuietly());
-	}
-
 	private void schedulePeriodicManifestRefresh()
 	{
 		cancelPeriodicManifestRefresh();
-		int minutes = MANIFEST_REFRESH_INTERVAL_MINUTES;
 		if (GraphicsEnvironment.isHeadless())
 		{
 			return;
 		}
-		if (refreshScheduler == null)
-		{
-			refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-				Thread t = new Thread(r, "osrs-color-lock-periodic");
-				t.setDaemon(true);
-				return t;
-			});
-		}
-		scheduledManifestRefresh = refreshScheduler.scheduleAtFixedRate(
-			() -> {
-				if (GraphicsEnvironment.isHeadless())
-				{
-					return;
-				}
-				kickoffRemoteRefreshCycle();
-			},
+		int minutes = MANIFEST_REFRESH_INTERVAL_MINUTES;
+		scheduledManifestRefresh = scheduledExecutor.scheduleAtFixedRate(
+			this::kickoffFetch,
 			minutes,
 			minutes,
 			TimeUnit.MINUTES
@@ -504,6 +494,142 @@ public class ColorLockPlugin extends Plugin
 			scheduledManifestRefresh.cancel(false);
 			scheduledManifestRefresh = null;
 		}
+	}
+
+	private void schedulePeriodicMeHeartbeat()
+	{
+		cancelPeriodicMeHeartbeat();
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		scheduledMeHeartbeat = scheduledExecutor.scheduleAtFixedRate(
+			this::tickMeHeartbeat,
+			ME_HEARTBEAT_INTERVAL_SECONDS,
+			ME_HEARTBEAT_INTERVAL_SECONDS,
+			TimeUnit.SECONDS
+		);
+	}
+
+	private void cancelPeriodicMeHeartbeat()
+	{
+		if (scheduledMeHeartbeat != null)
+		{
+			scheduledMeHeartbeat.cancel(false);
+			scheduledMeHeartbeat = null;
+		}
+	}
+
+	private void tickMeHeartbeat()
+	{
+		if (!config.hubGroupSyncEnabled() || !hubCredentialsFilled(config))
+		{
+			return;
+		}
+		if (!groupSync.isResolvedOk())
+		{
+			return;
+		}
+		clientThread.invokeLater(() -> {
+			if (client.getGameState() != GameState.LOGGED_IN)
+			{
+				return;
+			}
+			String name = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
+			if (name == null || name.isBlank())
+			{
+				return;
+			}
+			String currentColorKey = currentEffectiveColorKey();
+			Boolean toggle = pendingSyncToggle;
+			pendingSyncToggle = null;
+			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle,
+				this::pullStateAndMirrorColorOnHeartbeat);
+		});
+	}
+
+	/**
+	 * Fire the {@code sync.enabled=false} PATCH so the hub timestamps the toggle and drops the
+	 * "Online" flag, then invoke {@code onPatchFinished} (always — even if we never sent the
+	 * request because there's no JWT / no player name yet) so the caller can clean up.
+	 */
+	private void reportSyncDisabledToHubBestEffort(Runnable onPatchFinished)
+	{
+		Runnable done = onPatchFinished == null ? () -> { } : onPatchFinished;
+		if (!groupSync.isResolvedOk())
+		{
+			done.run();
+			return;
+		}
+		String name = null;
+		try
+		{
+			name = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
+		}
+		catch (RuntimeException ignored)
+		{
+		}
+		if (name == null || name.isBlank())
+		{
+			done.run();
+			return;
+		}
+		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, done);
+	}
+
+	private String currentEffectiveColorKey()
+	{
+		ColorLockColor c = groupSync.effectiveAssignment(config);
+		return c == null ? null : c.getKey();
+	}
+
+	/**
+	 * After every heartbeat, refresh group state so a hub-side {@code member.assignedColor} change
+	 * propagates without requiring a settings reopen or re-sync.
+	 */
+	private void pullStateAndMirrorColorOnHeartbeat()
+	{
+		final ColorLockColor before = groupSync.getHubAssignedColor();
+		groupSync.pollStateAsync(config, () -> {
+			ColorLockColor after = groupSync.getHubAssignedColor();
+			boolean colorChanged = after != null && before != after;
+			if (after != null)
+			{
+				mirrorHubAssignedColorIntoConfig();
+			}
+			if (colorChanged)
+			{
+				String slug = config.groupSlug() == null ? "" : config.groupSlug().trim();
+				String fromKey = before == null ? "(none)" : before.getKey();
+				postChatBanner("Color Locked: hub changed your color to " + after.getKey()
+					+ " (was " + fromKey + ") for group " + slug + ".");
+			}
+		});
+	}
+
+	private void sendPresenceOfflineBestEffort()
+	{
+		if (!config.hubGroupSyncEnabled() || !hubCredentialsFilled(config))
+		{
+			return;
+		}
+		if (!groupSync.isResolvedOk())
+		{
+			return;
+		}
+		String name = null;
+		try
+		{
+			name = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
+		}
+		catch (RuntimeException ignored)
+		{
+		}
+		if (name == null || name.isBlank())
+		{
+			return;
+		}
+		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), null);
 	}
 
 	private void kickoffFetch()
@@ -522,9 +648,17 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
+		final ColorLockColor savedBefore = config.assignedColor();
+		final String prevItemsUrl = manifestStore.lastLoadedManifestUrl();
+		final int prevSchema = manifestStore.manifestSchemaVersion();
 		groupSync.refreshAsync(config, () -> {
 			mirrorHubAssignedColorIntoConfig();
-			manifestStore.downloadAsync(this::validateSchemaQuietly);
+			postSyncBanner(savedBefore, "Sync with group");
+			pushMeHeartbeatNowAndShortRetry();
+			manifestStore.downloadAsync(() -> {
+				validateSchemaQuietly();
+				postItemsMismatchBannerIfChanged(prevItemsUrl, prevSchema);
+			});
 		});
 	}
 
@@ -535,11 +669,28 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
-		ColorLockColor savedBefore = config.assignedColor();
+		final ColorLockColor savedBefore = config.assignedColor();
+		final String prevItemsUrl = manifestStore.lastLoadedManifestUrl();
+		final int prevSchema = manifestStore.manifestSchemaVersion();
 		groupSync.refreshAsync(config, () -> {
 			mirrorHubAssignedColorIntoConfig();
-			postLoginVerificationBanner(savedBefore);
+			postSyncBanner(savedBefore, "Login check");
+			pushMeHeartbeatNowAndShortRetry();
+			manifestStore.downloadAsync(() -> {
+				validateSchemaQuietly();
+				postItemsMismatchBannerIfChanged(prevItemsUrl, prevSchema);
+			});
 		});
+	}
+
+	/**
+	 * Push the player's RS name to the hub immediately after a successful sync, plus a single 5 s retry to
+	 * cover the LOGGED_IN race where {@code client.getLocalPlayer().getName()} is briefly null.
+	 */
+	private void pushMeHeartbeatNowAndShortRetry()
+	{
+		tickMeHeartbeat();
+		scheduledExecutor.schedule(this::tickMeHeartbeat, 5, TimeUnit.SECONDS);
 	}
 
 	private void mirrorHubAssignedColorIntoConfig()
@@ -554,53 +705,161 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		configManager.setConfiguration("colorlockhelper", "assignedColor", hub.name());
-		lastSeenHubPresentationEpochInSettingsUi = Long.MIN_VALUE;
 	}
 
-	private void postLoginVerificationBanner(ColorLockColor savedBefore)
+	private void postSyncBanner(ColorLockColor savedBefore, String trigger)
 	{
 		int auth = groupSync.getLastAuthHttpStatus();
 		int state = groupSync.getLastStateHttpStatus();
+		String authErr = groupSync.getLastAuthErrorMessage();
 		boolean ok = groupSync.isResolvedOk();
 		boolean active = groupSync.isLastMemberActive();
 		ColorLockColor hubNow = groupSync.getHubAssignedColor();
 
-		String msg = null;
-		if (auth == 401 || auth == 403)
+		boolean authJwtOk = auth == java.net.HttpURLConnection.HTTP_OK;
+		boolean statelessResolveOk = auth == java.net.HttpURLConnection.HTTP_NOT_FOUND && ok && active;
+		if (!authJwtOk && !statelessResolveOk)
 		{
-			msg = "Color Locked: hub auth rejected (HTTP " + auth + "). Check Group code, Member code, and password.";
-		}
-		else if (auth == 404)
-		{
-			msg = "Color Locked: hub does not recognise this Group code.";
-		}
-		else if (auth != java.net.HttpURLConnection.HTTP_OK)
-		{
-			msg = "Color Locked: could not reach hub (auth status " + auth + "). Sync will retry next login.";
-		}
-		else if (!active)
-		{
-			msg = "Color Locked: your hub membership is not active. Manual color-lock is in effect.";
-		}
-		else if (!ok)
-		{
-			msg = "Color Locked: hub state read failed (HTTP " + state + "). Color may be stale.";
-		}
-		else if (hubNow != null && savedBefore != null && hubNow != savedBefore)
-		{
-			msg = "Color Locked: hub changed your assignment to " + hubNow.getKey()
-				+ " (was " + savedBefore.getKey() + "). Settings updated.";
-		}
-		if (msg == null)
-		{
+			String friendly = mapAuthErrorToFriendlyText(auth, authErr);
+			postChatBanner(trigger + ": " + friendly);
 			return;
 		}
-		final String chatLine = msg;
+		if (!active)
+		{
+			postChatBanner(trigger + ": your group membership is not active (likely kicked). Manual color-lock is in effect.");
+			return;
+		}
+		if (!ok)
+		{
+			postChatBanner(trigger + ": hub state read failed (HTTP " + state + "). Color may be stale.");
+			return;
+		}
+		String color = hubNow == null ? "no color yet" : hubNow.getKey();
+		String slug = config.groupSlug() == null ? "" : config.groupSlug().trim();
+		boolean changed = hubNow != null && savedBefore != null && hubNow != savedBefore;
+		if (changed)
+		{
+			postChatBanner("Color Locked: " + trigger.toLowerCase() + " - hub assigned you " + color
+				+ " (was " + savedBefore.getKey() + ") for group " + slug + ".");
+			return;
+		}
+		if ("Sync with group".equalsIgnoreCase(trigger))
+		{
+			postChatBanner("Color Locked: synced - group " + slug + ", color " + color + ".");
+		}
+	}
+
+	/**
+	 * Map hub error responses to user-actionable chat lines. Hub error strings (per the
+	 * webapp's {@code lookupActiveMemberByPublicCode}): "Invalid join passcode",
+	 * "Group not found", "Unknown member code for this group", "Member not active for this group".
+	 */
+	private static String mapAuthErrorToFriendlyText(int httpStatus, String hubErr)
+	{
+		String e = hubErr == null ? "" : hubErr.trim();
+		String low = e.toLowerCase(java.util.Locale.ENGLISH);
+
+		if (low.contains("invalid join passcode") || low.contains("join passcode"))
+		{
+			return "wrong Group password. If the group doesn't use one, clear that field.";
+		}
+		if (low.contains("unknown member code"))
+		{
+			return "Member code is not recognised for this group.";
+		}
+		if (low.contains("group not found"))
+		{
+			return "Group code is not recognised by the hub.";
+		}
+		if (low.contains("member not active"))
+		{
+			return "your group membership is not active (likely kicked). Manual color-lock is in effect.";
+		}
+		if (low.contains("publiccode required") || low.contains("slug or inviteurl"))
+		{
+			return "missing required field on auth request: " + e;
+		}
+		if (low.contains("storage") || low.contains("redis") || httpStatus == 503)
+		{
+			return "hub storage is unavailable right now. Try again in a minute.";
+		}
+		if (httpStatus == 401)
+		{
+			return "hub auth rejected (401). " + (e.isEmpty() ? "Check Group code and Member code." : e);
+		}
+		if (httpStatus == 403)
+		{
+			return e.isEmpty()
+				? "hub refused this account (403). Check Group password if the group has one."
+				: "hub refused this account (403): " + e;
+		}
+		if (httpStatus == 404)
+		{
+			return "hub does not recognise this Group code or Member code.";
+		}
+		if (httpStatus <= 0)
+		{
+			return "could not reach the hub. Check your internet connection.";
+		}
+		return "hub error (HTTP " + httpStatus + ")" + (e.isEmpty() ? "." : ": " + e);
+	}
+
+	private void postItemsMismatchBannerIfChanged(String prevUrl, int prevSchema)
+	{
+		String err = manifestStore.lastLoadError();
+		if (err != null)
+		{
+			postChatBanner("Color Locked: item list reload failed (" + err + ").");
+			return;
+		}
+		String curUrl = manifestStore.lastLoadedManifestUrl();
+		int curSchema = manifestStore.manifestSchemaVersion();
+		StringBuilder parts = new StringBuilder();
+		if (prevUrl != null && curUrl != null && !prevUrl.equals(curUrl))
+		{
+			parts.append("source moved to ").append(curUrl);
+		}
+		if (prevSchema > 0 && curSchema > 0 && prevSchema != curSchema)
+		{
+			if (parts.length() > 0) parts.append("; ");
+			parts.append("schemaVersion ").append(prevSchema).append(" -> ").append(curSchema);
+		}
+		if (curSchema > 0 && curSchema != EXPECTED_SCHEMA_VERSION)
+		{
+			if (parts.length() > 0) parts.append("; ");
+			parts.append("plugin expects schema ").append(EXPECTED_SCHEMA_VERSION)
+				.append(" but hub returned ").append(curSchema);
+		}
+		if (parts.length() > 0)
+		{
+			postChatBanner("Color Locked: items mismatch (" + parts + "). Rules reloaded from hub.");
+		}
+	}
+
+	private void postChatBanner(String text)
+	{
+		final String chatLine = text;
+		final String body;
+		String prefix = "Color Locked: ";
+		if (text != null && text.startsWith(prefix))
+		{
+			body = text.substring(prefix.length());
+		}
+		else
+		{
+			body = text == null ? "" : text;
+		}
+		final String formatted = new ChatMessageBuilder()
+			.append(ChatColorType.HIGHLIGHT)
+			.append("Color Locked: ")
+			.append(ChatColorType.NORMAL)
+			.append(body)
+			.build();
 		clientThread.invokeLater(() -> chatMessageManager.queue(QueuedMessage.builder()
 			.type(ChatMessageType.GAMEMESSAGE)
-			.runeLiteFormattedMessage("<col=ff5555>" + chatLine + "</col>")
+			.runeLiteFormattedMessage(formatted)
 			.build()));
-		log.warning(chatLine);
+		log.info(chatLine);
 	}
 
 	private void validateSchemaQuietly()
@@ -613,7 +872,7 @@ public class ColorLockPlugin extends Plugin
 		int v = manifestStore.manifestSchemaVersion();
 		if (v != EXPECTED_SCHEMA_VERSION)
 		{
-			log.warning("Items schemaVersion=" + v + " plugin expects " + EXPECTED_SCHEMA_VERSION + " — see DATA_CONTRACT.md");
+			log.warn("Items schemaVersion={} plugin expects {} - see DATA_CONTRACT.md", v, EXPECTED_SCHEMA_VERSION);
 		}
 	}
 
@@ -622,7 +881,7 @@ public class ColorLockPlugin extends Plugin
 		return raw != null && Boolean.parseBoolean(raw.trim());
 	}
 
-	private static boolean groupSlugAndMemberCodeFilled(ColorLockConfig cfg)
+	private static boolean hubCredentialsFilled(ColorLockConfig cfg)
 	{
 		if (cfg == null)
 		{
@@ -633,31 +892,14 @@ public class ColorLockPlugin extends Plugin
 		return !slug.isEmpty() && !code.isEmpty();
 	}
 
-	private void maybeRefreshAssignedColorRowGreyState()
-	{
-		if (GraphicsEnvironment.isHeadless())
-		{
-			return;
-		}
-		long now = System.currentTimeMillis();
-		long epoch = groupSync.hubPresentationEpoch();
-		boolean epochChanged = epoch != lastSeenHubPresentationEpochInSettingsUi;
-		if (!epochChanged && now - lastMuteSwingMs < 500L)
-		{
-			return;
-		}
-		lastSeenHubPresentationEpochInSettingsUi = epoch;
-		lastMuteSwingMs = now;
-		final boolean mute = groupSync.hubOverridesManualAssignedColor(config);
-		SwingUtilities.invokeLater(() -> applyAssignedColorRowMuteInConfigPanels(mute));
-	}
-
-	private static void applyAssignedColorRowMuteInConfigPanels(boolean disableManualPicker)
+	/** @return {@code true} when the plugin's settings panel (the "Your color lock" row) is visible. */
+	private boolean applyAssignedColorRowMuteInConfigPanels(boolean disableManualPicker)
 	{
 		String wantTitle = ColorLockConfig.ASSIGNED_COLOR_CONFIG_NAME;
+		ColorLockColor want = config.assignedColor();
 		for (Window w : Window.getWindows())
 		{
-			if (w == null || !w.isDisplayable())
+			if (w == null || !w.isDisplayable() || !w.isShowing())
 			{
 				continue;
 			}
@@ -682,12 +924,37 @@ public class ColorLockPlugin extends Plugin
 			{
 				continue;
 			}
+			JComboBox<?> combo = (JComboBox<?>) east;
 			rowLabel.setEnabled(!disableManualPicker);
-			east.setEnabled(!disableManualPicker);
+			combo.setEnabled(!disableManualPicker);
 			rowLabel.setForeground(disableManualPicker
 				? ColorScheme.MEDIUM_GRAY_COLOR : ColorScheme.TEXT_COLOR);
+			if (want != null && combo.getSelectedItem() != want)
+			{
+				combo.setSelectedItem(want);
+			}
+			return true;
+		}
+		return false;
+	}
+
+	private void maybeResyncOnSettingsOpened()
+	{
+		if (!config.hubGroupSyncEnabled() || !hubCredentialsFilled(config))
+		{
 			return;
 		}
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		if (lastSettingsOpenResyncMs != 0L && now - lastSettingsOpenResyncMs < SETTINGS_OPEN_RESYNC_DEBOUNCE_MS)
+		{
+			return;
+		}
+		lastSettingsOpenResyncMs = now;
+		runLoginVerification();
 	}
 
 	private static JLabel findJLabelMatchingText(Component root, String exact)

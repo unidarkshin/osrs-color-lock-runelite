@@ -28,7 +28,9 @@ set ROOT=%~dp0..
 
 set SIDELOAD=%USERPROFILE%\.runelite\sideloaded-plugins
 
-set PLUGIN_JAR=%ROOT%\build\libs\osrs-color-lock-runelite-1.0-SNAPSHOT.jar
+REM Pick whichever jar gradle just produced (filename includes project.version).
+
+set PLUGIN_JAR=
 
 set REPO2=%USERPROFILE%\.runelite\repository2
 
@@ -56,15 +58,27 @@ popd
 
 
 
-if not exist "%PLUGIN_JAR%" (
+for /f "delims=" %%F in ('dir /b /o-d "%ROOT%\build\libs\osrs-color-lock-runelite-*.jar" 2^>nul') do (
 
-  echo Missing plugin JAR after build: %PLUGIN_JAR%
+  if not defined PLUGIN_JAR set PLUGIN_JAR=%ROOT%\build\libs\%%F
+
+)
+
+
+
+if not defined PLUGIN_JAR (
+
+  echo Missing plugin JAR in %ROOT%\build\libs after build.
 
   pause
 
   exit /b 1
 
 )
+
+
+
+echo Using plugin jar: %PLUGIN_JAR%
 
 if not exist "%REPO2%" (
 
@@ -95,6 +109,10 @@ if not exist "%RL_JAVA%" (
 
 
 mkdir "%SIDELOAD%" 2>nul
+
+REM Wipe any previous color-lock jars in sideload so old versions don't shadow the new one.
+
+del /q "%SIDELOAD%\osrs-color-lock-runelite-*.jar" 2>nul
 
 copy /Y "%PLUGIN_JAR%" "%SIDELOAD%\" >nul
 

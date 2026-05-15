@@ -14,18 +14,20 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.concurrent.ScheduledExecutorService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.util.zip.CRC32;
 
 @Singleton
 public class ManifestStore
 {
-	private static final Logger log = Logger.getLogger(ManifestStore.class.getName());
+	private static final Logger log = LoggerFactory.getLogger(ManifestStore.class);
 
 	private final ClientThread clientThread;
 	private final ColorLockGroupSync groupSync;
 	private final ColorLockConfig config;
+	private final ScheduledExecutorService executor;
 
 	private volatile Map<Integer, ManifestItem> byId = Collections.emptyMap();
 	private volatile int manifestSchemaVersion = -1;
@@ -35,15 +37,16 @@ public class ManifestStore
 
 	/** After first successful load; used with payload CRC to spot silent manifest drift. */
 	private volatile int lastSnapshotItemCount = -1;
-	private volatile int lastSnapshotSchemaVersion = Integer.MIN_VALUE;
 	private volatile long lastManifestPayloadCrc = Long.MIN_VALUE;
 
 	@Inject
-	public ManifestStore(ClientThread clientThread, ColorLockGroupSync groupSync, ColorLockConfig config)
+	public ManifestStore(ClientThread clientThread, ColorLockGroupSync groupSync, ColorLockConfig config,
+		ScheduledExecutorService executor)
 	{
 		this.clientThread = clientThread;
 		this.groupSync = groupSync;
 		this.config = config;
+		this.executor = executor;
 	}
 
 	public String lastLoadError()
@@ -92,20 +95,9 @@ public class ManifestStore
 		return row;
 	}
 
-	public boolean isUsableByAssignment(int itemId, ColorLockColor assignment)
-	{
-		return ManifestRules.isUsableByAssignment(byId.get(itemId), assignment);
-	}
-
-	/** True when manifest lists usableColors and your lock is not among them. Unknown items are not restricted. */
-	public boolean isRestrictedForAssignment(int itemId, ColorLockColor assignment)
-	{
-		return isRestrictedForAssignment(itemId, assignment, null);
-	}
-
 	/**
-	 * Like {@link #isRestrictedForAssignment(int, ColorLockColor)} but resolves manifest rows via
-	 * {@link #getListedManifestItem(int, ItemManager)} so variant ids match canonical entries.
+	 * True when the manifest lists {@code usableColors} for this id (or its canonical alias) and the
+	 * supplied {@code assignment} is not in the set. Unknown items are not restricted.
 	 */
 	public boolean isRestrictedForAssignment(int itemId, ColorLockColor assignment, ItemManager itemManager)
 	{
@@ -126,19 +118,50 @@ public class ManifestStore
 
 	public void downloadAsync(Runnable onClientThreadFinish)
 	{
-		final String url = groupSync.getEffectiveItemsManifestUrl(config);
-		new Thread(() -> {
-			try
+		final String primary = groupSync.getEffectiveItemsManifestUrl(config);
+		final String fallbackV1 = groupSync.getDefaultItemsManifestUrl();
+		final String fallbackLegacy = groupSync.getLegacyItemsManifestUrl();
+		executor.execute(() -> {
+			log.info("color-lock manifest fetching {}", primary);
+			if (tryLoadOrLog(primary))
 			{
-				loadBlocking(url);
+				clientThread.invokeLater(onClientThreadFinish);
+				return;
 			}
-			catch (IOException e)
+			if (fallbackV1 != null && !fallbackV1.isEmpty() && !fallbackV1.equals(primary))
 			{
-				loadError = e.getMessage();
-				log.log(Level.WARNING, "color-lock manifest fetch failed", e);
+				log.warn("color-lock manifest fetch failed at {} - retrying default {}", primary, fallbackV1);
+				groupSync.clearItemsUrlOverride();
+				if (tryLoadOrLog(fallbackV1))
+				{
+					clientThread.invokeLater(onClientThreadFinish);
+					return;
+				}
+			}
+			if (fallbackLegacy != null && !fallbackLegacy.isEmpty()
+				&& !fallbackLegacy.equals(primary) && !fallbackLegacy.equals(fallbackV1))
+			{
+				log.warn("color-lock manifest fetch retrying deprecated {}", fallbackLegacy);
+				tryLoadOrLog(fallbackLegacy);
 			}
 			clientThread.invokeLater(onClientThreadFinish);
-		}, "osrs-color-lock-manifest").start();
+		});
+	}
+
+	private boolean tryLoadOrLog(String url)
+	{
+		try
+		{
+			loadBlocking(url);
+			loadError = null;
+			return true;
+		}
+		catch (IOException e)
+		{
+			loadError = e.getMessage();
+			log.warn("color-lock manifest fetch failed at {}", url, e);
+			return false;
+		}
 	}
 
 	void loadBlocking(String url) throws IOException
@@ -188,7 +211,7 @@ public class ManifestStore
 		}
 		if (duplicateIds > 0)
 		{
-			log.warning("Items manifest ignored " + duplicateIds + " duplicate id row(s); last row per id wins");
+			log.warn("Items manifest ignored {} duplicate id row(s); last row per id wins", duplicateIds);
 		}
 
 		byId = Collections.unmodifiableMap(next);
@@ -202,31 +225,18 @@ public class ManifestStore
 
 		lastManifestPayloadCrc = crcVal;
 		lastSnapshotItemCount = n;
-		lastSnapshotSchemaVersion = s;
 
 		if (drift)
 		{
-			log.info(() -> String.format(
-				"Items manifest payload changed (%d entries, schema %d); rules updated from host",
-				n,
-				s
-			));
+			log.info("Items manifest payload changed ({} entries, schema {}); rules updated from host", n, s);
 		}
 		if (firstLoad || drift)
 		{
-			log.info(() -> String.format(
-				"color-lock manifest loaded %d items schemaVersion=%s",
-				byId.size(),
-				Integer.toString(manifestSchemaVersion)
-			));
+			log.info("color-lock manifest loaded {} items schemaVersion={}", byId.size(), manifestSchemaVersion);
 		}
 		else
 		{
-			log.fine(() -> String.format(
-				"manifest refresh unchanged (%d entries, crc32=%08x)",
-				n,
-				crcVal
-			));
+			log.debug("manifest refresh unchanged ({} entries, crc32={})", n, String.format("%08x", crcVal));
 		}
 	}
 

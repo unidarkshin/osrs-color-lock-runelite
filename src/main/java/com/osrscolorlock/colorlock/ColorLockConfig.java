@@ -14,7 +14,7 @@ public interface ColorLockConfig extends Config
 		position = 10,
 		keyName = "groupSlug",
 		name = "Group code",
-		description = "From your Color Lock hub URL (/g/…)."
+		description = "Group code from your Color Lock hub URL (/g/…). You can also paste the full invite URL."
 	)
 	default String groupSlug()
 	{
@@ -24,8 +24,8 @@ public interface ColorLockConfig extends Config
 	@ConfigItem(
 		position = 11,
 		keyName = "groupJoinPasscode",
-		name = "Group password (optional)",
-		description = "Only if your group uses a join password — required for plugin-resolve."
+		name = "Group password",
+		description = "Optional. Only required when the hub group is protected with a join password; leave blank otherwise."
 	)
 	default String groupJoinPasscode()
 	{
@@ -47,8 +47,10 @@ public interface ColorLockConfig extends Config
 		position = 13,
 		keyName = "hubGroupSyncEnabled",
 		name = "Sync with group",
-		description = "Authenticate to the hub with Group code + Member code, pull roster and assigned color from the hub, "
-			+ "and reload item rules. Requires both fields filled. Uncheck to use only manual color-lock below."
+		description = "Authenticate to the hub with Group code and Member code (plus Group password if the group has one), "
+			+ "pull your assigned color, and reload item rules. While enabled, the plugin sends a presence heartbeat so the "
+			+ "hub shows you online. Requires Group code and Member code filled. Changing any credential field disables sync "
+			+ "until you re-check the box."
 	)
 	default boolean hubGroupSyncEnabled()
 	{

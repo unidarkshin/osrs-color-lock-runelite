@@ -34,10 +34,13 @@ import javax.swing.JLabel;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JTabbedPane;
 import javax.swing.JTextField;
 import javax.swing.JViewport;
 import javax.swing.ScrollPaneConstants;
+import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -82,6 +85,13 @@ public class ColorLockLookupPanel extends PluginPanel
 	private final JCheckBox myPaletteOnlyCheckbox = new JCheckBox("My palette only");
 	private final JCheckBox allColorsListingsCheckbox = new JCheckBox("All-colors only");
 	private final JPanel resultsPanel;
+	private final JTabbedPane tabs = new JTabbedPane();
+	private final JPanel groupRosterColumn = new JPanel();
+	private final JLabel groupHeaderLabel = new JLabel(" ", SwingConstants.LEFT);
+	private final JPanel groupEnabledColorsRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+	private final JLabel groupStateLabel = new JLabel(" ", SwingConstants.LEFT);
+	private Timer groupRefreshTimer;
+	private long lastRenderedStateMs;
 
 	@Inject
 	ColorLockLookupPanel(
@@ -106,7 +116,8 @@ public class ColorLockLookupPanel extends PluginPanel
 		resultsPanel = new JPanel();
 		resultsPanel.setLayout(new BoxLayout(resultsPanel, BoxLayout.Y_AXIS));
 		resultsPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-		showPlaceholderIntro();
+
+		JPanel itemsTab = new JPanel(new BorderLayout());
 
 		JScrollPane scroll = new JScrollPane(
 			resultsPanel,
@@ -133,7 +144,7 @@ public class ColorLockLookupPanel extends PluginPanel
 		}
 		myPaletteOnlyCheckbox.setSelected(palCfg);
 		myPaletteOnlyCheckbox.setToolTipText(
-			"Only items your color lock can use (group palette intersect). Mutually exclusive with All-colors-only.");
+			"Only items your color lock can use. Mutually exclusive with All-colors-only.");
 		myPaletteOnlyCheckbox.setAlignmentX(Component.LEFT_ALIGNMENT);
 		JPanel paletteRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
 		paletteRow.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -162,9 +173,20 @@ public class ColorLockLookupPanel extends PluginPanel
 		south.add(urlLink(ColorLockWeb.HUB));
 		south.add(urlLink(ColorLockWeb.ITEMS_PAGE));
 
-		add(north, BorderLayout.NORTH);
-		add(scroll, BorderLayout.CENTER);
-		add(south, BorderLayout.SOUTH);
+		itemsTab.add(north, BorderLayout.NORTH);
+		itemsTab.add(scroll, BorderLayout.CENTER);
+		itemsTab.add(south, BorderLayout.SOUTH);
+
+		tabs.addTab("Items", itemsTab);
+		tabs.addTab("Group", buildGroupTab());
+		tabs.addChangeListener(e -> {
+			if (isGroupTabSelected())
+			{
+				refreshGroupTab();
+			}
+		});
+
+		add(tabs, BorderLayout.CENTER);
 
 		searchButton.addActionListener(e -> runSearch());
 		queryField.addActionListener(e -> runSearch());
@@ -196,6 +218,293 @@ public class ColorLockLookupPanel extends PluginPanel
 				Boolean.toString(allColorsListingsCheckbox.isSelected()));
 			runSearch();
 		});
+
+		if (allColorsListingsCheckbox.isSelected())
+		{
+			runSearch();
+		}
+		else
+		{
+			showPlaceholderIntro();
+		}
+	}
+
+	@Override
+	public void onActivate()
+	{
+		super.onActivate();
+		String q = queryField.getText();
+		if (allColorsListingsCheckbox.isSelected() && (q == null || q.trim().length() < 2))
+		{
+			runSearch();
+		}
+		startGroupRefreshTimer();
+		if (isGroupTabSelected())
+		{
+			refreshGroupTab();
+		}
+	}
+
+	@Override
+	public void onDeactivate()
+	{
+		super.onDeactivate();
+		stopGroupRefreshTimer();
+	}
+
+	private boolean isGroupTabSelected()
+	{
+		return tabs.getSelectedIndex() == 1;
+	}
+
+	private JPanel buildGroupTab()
+	{
+		JPanel root = new JPanel(new BorderLayout(0, 6));
+		root.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+
+		JPanel header = new JPanel();
+		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
+		header.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+		groupHeaderLabel.setFont(groupHeaderLabel.getFont().deriveFont(Font.BOLD, 13f));
+		groupHeaderLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+		header.add(groupHeaderLabel);
+
+		groupEnabledColorsRow.setOpaque(false);
+		groupEnabledColorsRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+		header.add(groupEnabledColorsRow);
+
+		groupStateLabel.setForeground(new Color(160, 160, 160));
+		groupStateLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+		header.add(groupStateLabel);
+
+		JButton refreshBtn = new JButton("Refresh now");
+		refreshBtn.addActionListener(e -> {
+			groupStateLabel.setText("Refreshing\u2026");
+			groupSync.pollStateAsync(config,
+				() -> SwingUtilities.invokeLater(this::refreshGroupTab));
+		});
+		JPanel refreshRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+		refreshRow.setOpaque(false);
+		refreshRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+		refreshRow.add(refreshBtn);
+		header.add(refreshRow);
+
+		root.add(header, BorderLayout.NORTH);
+
+		groupRosterColumn.setLayout(new BoxLayout(groupRosterColumn, BoxLayout.Y_AXIS));
+		groupRosterColumn.setAlignmentX(Component.LEFT_ALIGNMENT);
+		JScrollPane rosterScroll = new JScrollPane(
+			groupRosterColumn,
+			ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+			ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+		rosterScroll.getVerticalScrollBar().setUnitIncrement(16);
+		rosterScroll.setBorder(BorderFactory.createEmptyBorder());
+		root.add(rosterScroll, BorderLayout.CENTER);
+
+		return root;
+	}
+
+	private void startGroupRefreshTimer()
+	{
+		if (groupRefreshTimer != null)
+		{
+			return;
+		}
+		// Read-only timer: re-renders from the cached snapshot every few seconds. The actual
+		// network poll piggy-backs on the heartbeat in ColorLockPlugin.
+		groupRefreshTimer = new Timer(3_000, e -> {
+			if (!isGroupTabSelected())
+			{
+				return;
+			}
+			long stateAt = groupSync.getLastStateAtMs();
+			if (stateAt != lastRenderedStateMs)
+			{
+				refreshGroupTab();
+			}
+		});
+		groupRefreshTimer.setRepeats(true);
+		groupRefreshTimer.start();
+	}
+
+	private void stopGroupRefreshTimer()
+	{
+		if (groupRefreshTimer != null)
+		{
+			groupRefreshTimer.stop();
+			groupRefreshTimer = null;
+		}
+	}
+
+	private void refreshGroupTab()
+	{
+		ColorLockGroupSync.GroupSnapshot g = groupSync.getGroupSnapshot();
+		List<ColorLockGroupSync.RosterMemberSnapshot> roster = groupSync.getRosterSnapshot();
+		long stateAt = groupSync.getLastStateAtMs();
+		lastRenderedStateMs = stateAt;
+
+		groupHeaderLabel.setText(g == null || g.name.isEmpty() ? "Color Locked group" : g.name);
+
+		groupEnabledColorsRow.removeAll();
+		if (g != null && !g.enabledColorsLowercase.isEmpty())
+		{
+			JLabel pre = new JLabel("Palette: ");
+			pre.setForeground(new Color(180, 180, 180));
+			groupEnabledColorsRow.add(pre);
+			for (String c : g.enabledColorsLowercase)
+			{
+				groupEnabledColorsRow.add(new PaletteChip(c));
+			}
+		}
+
+		if (!config.hubGroupSyncEnabled())
+		{
+			groupStateLabel.setText("Sync with group is off - enable it in plugin settings to see your roster.");
+		}
+		else if (g == null)
+		{
+			groupStateLabel.setText("Waiting for hub - check Group code, Member code, and Group password.");
+		}
+		else if (stateAt == 0L)
+		{
+			groupStateLabel.setText("Roster not pulled yet - heartbeat will refresh it within ~60s.");
+		}
+		else
+		{
+			long ageSec = Math.max(0, (System.currentTimeMillis() - stateAt) / 1000L);
+			groupStateLabel.setText("Last refreshed " + ageSec + "s ago.");
+		}
+
+		groupRosterColumn.removeAll();
+		if (roster == null || roster.isEmpty())
+		{
+			JLabel none = new JLabel("<html><body style='width:200px'>No roster data yet. Press <b>Refresh now</b> or wait for the next heartbeat.</body></html>");
+			none.setForeground(ROSTER_BODY_FG);
+			none.setBorder(BorderFactory.createEmptyBorder(6, 4, 0, 0));
+			none.setAlignmentX(Component.LEFT_ALIGNMENT);
+			groupRosterColumn.add(none);
+		}
+		else
+		{
+			boolean first = true;
+			for (ColorLockGroupSync.RosterMemberSnapshot row : roster)
+			{
+				if (!"active".equalsIgnoreCase(row.status))
+				{
+					continue;
+				}
+				if (!first)
+				{
+					groupRosterColumn.add(Box.createVerticalStrut(2));
+				}
+				first = false;
+				groupRosterColumn.add(buildRosterRow(row));
+			}
+		}
+		// Glue keeps stacked rows pinned to the top so BoxLayout doesn't stretch them apart.
+		groupRosterColumn.add(Box.createVerticalGlue());
+		groupRosterColumn.revalidate();
+		groupRosterColumn.repaint();
+		groupEnabledColorsRow.revalidate();
+		groupEnabledColorsRow.repaint();
+	}
+
+	private static final Color ROSTER_BODY_FG = new Color(210, 210, 210);
+	private static final Color ROSTER_MUTED_FG = new Color(155, 155, 160);
+	private static final Color ROSTER_ONLINE_FG = new Color(120, 200, 130);
+	private static final Color ROSTER_OFFLINE_FG = new Color(150, 150, 150);
+	private static final Color ROSTER_DIVIDER = new Color(60, 60, 64);
+
+	private JPanel buildRosterRow(ColorLockGroupSync.RosterMemberSnapshot m)
+	{
+		JPanel row = new JPanel();
+		row.setLayout(new BoxLayout(row, BoxLayout.Y_AXIS));
+		row.setAlignmentX(Component.LEFT_ALIGNMENT);
+		row.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(0, 0, 1, 0, ROSTER_DIVIDER),
+			BorderFactory.createEmptyBorder(6, 2, 6, 2)));
+
+		// Line 1: name (left) + presence badge (right).
+		JPanel line1 = new JPanel(new BorderLayout(8, 0));
+		line1.setOpaque(false);
+		line1.setAlignmentX(Component.LEFT_ALIGNMENT);
+		JLabel name = new JLabel(m.displayName.isEmpty() ? "(unnamed)" : m.displayName);
+		name.setFont(name.getFont().deriveFont(Font.BOLD, 13f));
+		name.setForeground(ROSTER_BODY_FG);
+		line1.add(name, BorderLayout.WEST);
+
+		JLabel presenceBadge = new JLabel(m.presenceOnline ? "● Online" : "○ Offline");
+		presenceBadge.setFont(presenceBadge.getFont().deriveFont(12f));
+		presenceBadge.setForeground(m.presenceOnline ? ROSTER_ONLINE_FG : ROSTER_OFFLINE_FG);
+		if (!m.presenceOnline && m.presenceSummary != null && !m.presenceSummary.isEmpty())
+		{
+			presenceBadge.setToolTipText(m.presenceSummary);
+		}
+		line1.add(presenceBadge, BorderLayout.EAST);
+		row.add(line1);
+
+		// Line 2: role / sync state. Keep concise; tooltip carries the long-form details.
+		String roleTxt = "creator".equalsIgnoreCase(m.role) ? "Creator" : "Member";
+		String syncTxt = m.pluginSyncDisplay == null || m.pluginSyncDisplay.isEmpty()
+			? "—"
+			: m.pluginSyncDisplay;
+		JLabel meta = new JLabel(roleTxt + "  ·  Sync: " + syncTxt);
+		meta.setFont(meta.getFont().deriveFont(12f));
+		meta.setForeground(ROSTER_MUTED_FG);
+		meta.setAlignmentX(Component.LEFT_ALIGNMENT);
+		meta.setBorder(BorderFactory.createEmptyBorder(2, 0, 0, 0));
+		if (m.pluginSyncCaution)
+		{
+			meta.setText(meta.getText() + "  \u26A0");
+			meta.setToolTipText("Plugin reported a different in-client color than the hub-assigned one.");
+		}
+		row.add(meta);
+
+		// Line 3: swatch(es) on their own line so future multi-color assignments expand cleanly.
+		JPanel swatchRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+		swatchRow.setOpaque(false);
+		swatchRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+		swatchRow.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
+		JLabel lockLbl = new JLabel("Lock:");
+		lockLbl.setFont(lockLbl.getFont().deriveFont(12f));
+		lockLbl.setForeground(ROSTER_MUTED_FG);
+		swatchRow.add(lockLbl);
+		List<String> assignedKeys = assignedColorKeysOf(m);
+		if (assignedKeys.isEmpty())
+		{
+			JLabel dash = new JLabel("unassigned");
+			dash.setFont(dash.getFont().deriveFont(12f));
+			dash.setForeground(ROSTER_MUTED_FG);
+			swatchRow.add(dash);
+		}
+		else
+		{
+			for (String key : assignedKeys)
+			{
+				swatchRow.add(new PaletteChip(key));
+			}
+		}
+		row.add(swatchRow);
+
+		// Constrain max height so BoxLayout never stretches a row to fill leftover space.
+		Dimension pref = row.getPreferredSize();
+		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, pref.height));
+		return row;
+	}
+
+	/**
+	 * Hub currently sends a single {@code assignedColor}. When multi-color assignments land
+	 * (e.g. {@code assignedColors: ["red","yellow"]}) this is the one place to swap in the
+	 * new list - the row layout already supports N chips.
+	 */
+	private static List<String> assignedColorKeysOf(ColorLockGroupSync.RosterMemberSnapshot m)
+	{
+		if (m.assignedColorKey == null || m.assignedColorKey.isEmpty())
+		{
+			return java.util.Collections.emptyList();
+		}
+		return java.util.Collections.singletonList(m.assignedColorKey);
 	}
 
 	@Override
@@ -223,7 +532,7 @@ public class ColorLockLookupPanel extends PluginPanel
 	private void showPlaceholderIntro()
 	{
 		resultsPanel.removeAll();
-		JLabel intro = new JLabel("<html><body style='width:220px'>Type part of a name (at least 2 letters), then <b>Search</b>. Each row lists palette colors as swatches (hover for the color name).</body></html>");
+		JLabel intro = new JLabel("<html><body style='width:220px'>Type part of a name (at least 2 letters), then <b>Search</b>. Each row lists palette colors as swatches (hover for the color name). Tick <b>All-colors only</b> with an empty search to browse every opt-out item.</body></html>");
 		intro.setAlignmentX(Component.LEFT_ALIGNMENT);
 		resultsPanel.add(intro);
 		resultsPanel.revalidate();
@@ -234,7 +543,8 @@ public class ColorLockLookupPanel extends PluginPanel
 	{
 		String raw = queryField.getText();
 		String q = raw == null ? "" : raw.trim().toLowerCase(Locale.ENGLISH);
-		if (q.length() < 2)
+		final boolean browseAllColors = allColorsListingsCheckbox.isSelected() && q.length() < 2;
+		if (q.length() < 2 && !browseAllColors)
 		{
 			SwingUtilities.invokeLater(() -> {
 				resultsPanel.removeAll();
@@ -245,9 +555,11 @@ public class ColorLockLookupPanel extends PluginPanel
 			return;
 		}
 
+		final String query = browseAllColors ? "" : q;
+
 		SwingUtilities.invokeLater(() -> {
 			resultsPanel.removeAll();
-			resultsPanel.add(new JLabel("Searching…"));
+			resultsPanel.add(new JLabel(browseAllColors ? "Loading All-colors items…" : "Searching…"));
 			resultsPanel.revalidate();
 			resultsPanel.repaint();
 		});
@@ -267,7 +579,7 @@ public class ColorLockLookupPanel extends PluginPanel
 				{
 					continue;
 				}
-				if (!name.toLowerCase(Locale.ENGLISH).contains(q))
+				if (!query.isEmpty() && !name.toLowerCase(Locale.ENGLISH).contains(query))
 				{
 					continue;
 				}
@@ -326,7 +638,7 @@ public class ColorLockLookupPanel extends PluginPanel
 			}
 			else if (allColorsListingsCheckbox.isSelected())
 			{
-				msg = "No hub opt-out matches — broaden the query or turn off All-colors filter.";
+				msg = "No All-colors items in the current manifest.";
 			}
 			else
 			{
@@ -370,13 +682,6 @@ public class ColorLockLookupPanel extends PluginPanel
 
 	private JPanel createResultRow(LookupHit hit)
 	{
-		ManifestItem listedEarly = hit.manifestRow;
-		boolean hasColorsEarly = listedEarly != null && !listedEarly.getUsableColors().isEmpty();
-		if (hasColorsEarly && !ManifestRules.isLockEnforced(listedEarly))
-		{
-			return createCompactOptOutLookupRow(hit);
-		}
-
 		JPanel row = new JPanel();
 		row.setLayout(new BoxLayout(row, BoxLayout.Y_AXIS));
 		row.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -401,6 +706,8 @@ public class ColorLockLookupPanel extends PluginPanel
 		Font smallUi = bodyColumn.getFont().deriveFont(Font.PLAIN, 11f);
 		Color muted = new Color(150, 150, 160);
 
+		boolean isOptOut = listed != null && hasColors && !ManifestRules.isLockEnforced(listed);
+
 		if (!hasColors)
 		{
 			JPanel miss = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
@@ -411,40 +718,21 @@ public class ColorLockLookupPanel extends PluginPanel
 			miss.add(none);
 			bodyColumn.add(miss);
 		}
+		else if (isOptOut)
+		{
+			JPanel allRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+			allRow.setOpaque(false);
+			JLabel allLbl = new JLabel("All colors");
+			allLbl.setFont(bodyColumn.getFont().deriveFont(Font.BOLD, 12f));
+			allLbl.setForeground(new Color(110, 170, 120));
+			allRow.add(allLbl);
+			bodyColumn.add(allRow);
+		}
 		else
 		{
+			// Per-item palette chips only. Group / crew intersection moved to a future "Group"
+			// sidebar tab that will also show group name, member display names, and assignments.
 			appendPaletteChipsWrapped(bodyColumn, ManifestRules.usableColorsManifestOrdered(listed));
-
-			Set<String> crewFilter = groupSync.manifestRuleCrewFilter(config);
-
-			if (crewFilter != null)
-			{
-				List<String> crewOverlap = ManifestRules.usableColorsEffectiveForCrew(listed, crewFilter);
-				JPanel crewRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-				crewRow.setOpaque(false);
-				JLabel cl = new JLabel("Group");
-				cl.setFont(smallUi);
-				cl.setForeground(muted);
-				crewRow.add(cl);
-				if (crewOverlap.isEmpty())
-				{
-					JLabel na = new JLabel("(none — blocked)");
-					na.setFont(smallUi);
-					na.setForeground(new Color(200, 90, 96));
-					crewRow.add(na);
-				}
-				else
-				{
-					for (String key : crewOverlap)
-					{
-						if (key != null && !key.trim().isEmpty())
-						{
-							crewRow.add(new PaletteChip(key.trim()));
-						}
-					}
-				}
-				bodyColumn.add(crewRow);
-			}
 		}
 
 		row.add(Box.createVerticalStrut(4));
@@ -455,33 +743,6 @@ public class ColorLockLookupPanel extends PluginPanel
 		iconBody.add(iconLabel, BorderLayout.WEST);
 		iconBody.add(bodyColumn, BorderLayout.CENTER);
 		row.add(iconBody);
-		attachWikiOpenToLookupRow(row, hit);
-		return row;
-	}
-
-	/** Hub opt-out rows: one short strip (no full-width title + extra strut). */
-	private JPanel createCompactOptOutLookupRow(LookupHit hit)
-	{
-		JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-		row.setOpaque(false);
-		row.setAlignmentX(Component.LEFT_ALIGNMENT);
-		row.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(55, 55, 62)),
-			BorderFactory.createEmptyBorder(6, 4, 6, 4)));
-
-		JLabel iconLabel = new JLabel();
-		iconLabel.setPreferredSize(new Dimension(ICON_SLOT, ICON_SLOT));
-		iconLabel.setHorizontalAlignment(JLabel.CENTER);
-		iconLabel.setVerticalAlignment(JLabel.CENTER);
-		itemManager.getImage(hit.itemId).addTo(iconLabel);
-		row.add(iconLabel);
-
-		String safe = escapeHtml(hit.name.trim());
-		JLabel text = new JLabel("<html><body style='width:165px'><b>" + safe
-			+ ":</b> <span style='color:#6EAA78;font-weight:bold'>All colors</span></body></html>");
-		text.setVerticalAlignment(JLabel.TOP);
-		row.add(text);
-
 		attachWikiOpenToLookupRow(row, hit);
 		return row;
 	}
@@ -630,16 +891,42 @@ public class ColorLockLookupPanel extends PluginPanel
 		}
 	}
 
+	/** Color-wheel nav icon: 8 OSRS palette slices, dark padlock-shackle accent. */
 	static BufferedImage createNavIcon()
 	{
-		BufferedImage img = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
-		for (int x = 0; x < 32; x++)
+		final int size = 32;
+		final int pad = 2;
+		final int diameter = size - pad * 2;
+		BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+		Graphics2D g = img.createGraphics();
+		try
 		{
-			for (int y = 0; y < 32; y++)
+			g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+			String[] slices = {"red", "yellow", "green", "blue", "purple", "brown", "black", "white"};
+			float sliceDeg = 360f / slices.length;
+			for (int i = 0; i < slices.length; i++)
 			{
-				boolean edge = x == 0 || y == 0 || x == 31 || y == 31;
-				img.setRGB(x, y, edge ? 0xFF333333 : 0xFF6C5CE7);
+				g.setColor(ColorLockPalette.toUiColor(slices[i]));
+				g.fillArc(pad, pad, diameter, diameter, Math.round(90f - i * sliceDeg - sliceDeg), Math.round(sliceDeg) + 1);
 			}
+
+			g.setStroke(new java.awt.BasicStroke(1.2f));
+			g.setColor(new Color(20, 20, 24, 220));
+			g.drawOval(pad, pad, diameter - 1, diameter - 1);
+
+			int hole = 8;
+			int hx = size / 2 - hole / 2;
+			int hy = size / 2 - hole / 2;
+			g.setColor(new Color(30, 30, 35));
+			g.fillOval(hx, hy, hole, hole);
+			g.setColor(new Color(220, 220, 230, 200));
+			g.setStroke(new java.awt.BasicStroke(1.4f));
+			g.drawArc(hx + 1, hy - 2, hole - 2, hole - 1, 20, 140);
+		}
+		finally
+		{
+			g.dispose();
 		}
 		return img;
 	}

@@ -1,74 +1,24 @@
 package com.osrscolorlock.colorlock;
 
-import java.net.URI;
-import java.util.Locale;
-
-/** Canonical group app URLs — keep in sync with deployed Color Lock Hub. */
+/** Canonical group app URLs. Kept in sync with the deployed Color Lock Hub. */
 public final class ColorLockWeb
 {
 	public static final String HUB = "https://group.thegrandchart.com/";
 	public static final String ITEMS_PAGE = "https://group.thegrandchart.com/items";
-	/** Typical static manifest path — used only to derive the hub origin. Live pulls use `/api/items` or `GET state.items.url`. */
+	/** Typical static manifest path. Used only to derive the hub origin. Live pulls go through {@code /api/v1/items}. */
 	public static final String DEFAULT_ITEMS_JSON = "https://group.thegrandchart.com/data/items.json";
 
 	public static final String API_PLUGIN_AUTH = "/api/plugin/v1/auth";
 	public static final String API_PLUGIN_STATE = "/api/plugin/v1/state";
-
-	/** Stored in older profiles; rewritten to {@link #DEFAULT_ITEMS_JSON} on plugin start when still present. */
-	public static final String LEGACY_VERCEL_ITEMS_JSON = "https://osrs-color-lock.vercel.app/data/items.json";
-	public static final String LEGACY_VERCEL_API_ITEMS = "https://osrs-color-lock.vercel.app/api/items";
+	public static final String API_PLUGIN_ME = "/api/plugin/v1/me";
+	/** Versioned items endpoint (X-OCL-API-Contract-Version 1, X-OCL-Items-Schema-Version 2). */
+	public static final String API_V1_ITEMS = "/api/v1/items";
+	/** Deprecated unversioned alias for the items manifest — same payload as {@link #API_V1_ITEMS}. */
+	public static final String API_ITEMS_LEGACY = "/api/items";
+	/** Stateless member resolve when {@link #API_PLUGIN_AUTH} returns 404 (JWT-less; hub may lag on auth rollout). */
+	public static final String API_PLUGIN_RESOLVE_V1 = "/api/plugin/v1/resolve/";
 
 	private ColorLockWeb()
 	{
-	}
-
-	/**
-	 * True when the user's saved URL pointed at the old Vercel deployment (exact known paths or same host).
-	 */
-	public static boolean shouldMigrateLegacyVercelItemsUrl(String itemsUrlConfigured)
-	{
-		if (itemsUrlConfigured == null)
-		{
-			return false;
-		}
-		String t = itemsUrlConfigured.trim();
-		if (t.isEmpty())
-		{
-			return false;
-		}
-		String lower = t.toLowerCase(Locale.ENGLISH);
-		if (LEGACY_VERCEL_ITEMS_JSON.equalsIgnoreCase(t))
-		{
-			return true;
-		}
-		if (LEGACY_VERCEL_API_ITEMS.equalsIgnoreCase(t))
-		{
-			return true;
-		}
-		if (!lower.startsWith("http://") && !lower.startsWith("https://"))
-		{
-			return false;
-		}
-		try
-		{
-			String withScheme = t.startsWith("//") ? "https:" + t : t;
-			URI uri = URI.create(withScheme.replace(" ", ""));
-			String host = uri.getHost();
-			if (host == null)
-			{
-				return false;
-			}
-			if (!"osrs-color-lock.vercel.app".equalsIgnoreCase(host))
-			{
-				return false;
-			}
-			String path = uri.getRawPath();
-			String p = path == null ? "" : path.toLowerCase(Locale.ENGLISH);
-			return p.endsWith("/data/items.json") || p.endsWith("/api/items");
-		}
-		catch (IllegalArgumentException e)
-		{
-			return false;
-		}
 	}
 }
