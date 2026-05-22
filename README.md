@@ -3,6 +3,7 @@
 RuneLite plugin for **Group Ironman color-lock** runs. Pulls each member's assigned color and the gated-item ruleset from the [Color Lock hub](https://group.thegrandchart.com), then:
 
 - Blocks restricted right-click actions (Eat / Equip / Wield / Wear / Hold / Drink) on items your color cannot use.
+- Strips Mine / Chop when carrying a restricted pickaxe or axe in inventory or equipment.
 - Adds a small red marker on restricted items in inventory / bank / worn gear.
 - Provides an item lookup sidebar that shows each item's palette (and your group's intersection).
 - Mirrors the hub-assigned color into the plugin config and grays the manual picker while synced.
@@ -13,9 +14,8 @@ RuneLite plugin for **Group Ironman color-lock** runs. Pulls each member's assig
 1. Install **Color Locked** from the RuneLite plugin hub.
 2. Open the **Color Locked** settings.
 3. Fill in:
-   - **Group code** — from the hub URL `/g/<slug>` (you can also paste the full invite URL).
+   - **Group access code** — your combined `Slug#0000` code (you can also paste the full invite URL, or enter the slug and legacy member code separately).
    - **Group password** — only if your group uses one.
-   - **Member code** — your member/public code from the hub.
 4. Tick **Sync with group**. Watch the chat for the confirmation banner.
 
 If you don't have a Color Lock group yet, the plugin still works as a manual color-lock helper: pick **Your color lock** in settings and items outside that palette will be flagged.
@@ -44,7 +44,7 @@ Requires JDK 11+.
 ./gradlew build
 ```
 
-Output: `build/libs/osrs-color-lock-runelite-1.0-SNAPSHOT.jar`.
+Output: `build/libs/osrs-color-lock-runelite-1.0.0.jar`.
 
 Local dev (sideload):
 

@@ -13,7 +13,7 @@ repositories {
 	mavenCentral()
 }
 
-def runeLiteVersion = '1.12.26.3'
+def runeLiteVersion = 'latest.release'
 
 dependencies {
 	compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
@@ -30,17 +30,4 @@ java {
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
 	options.release.set(11)
-}
-
-tasks.named('jar') {
-	manifest {
-		attributes(
-			'Plugin-Name': 'Color Locked',
-			'Plugin-Version': project.version,
-			'Plugin-Description': "Group Iron color-lock: hub-driven assigned color, item-rule sync, restricted action blocking, and item lookup.",
-			'Plugin-Author': 'unidarkshin',
-			'Plugin-Tags': 'ironman,gim,groupiron,color-lock',
-			'Plugin-License': 'BSD-2-Clause'
-		)
-	}
 }
