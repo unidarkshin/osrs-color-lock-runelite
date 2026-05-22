@@ -10,11 +10,19 @@ public interface ColorLockConfig extends Config
 	/** Config row label title — used to find this row in RL settings UI. Must match {@link #assignedColor()} name exactly. */
 	String ASSIGNED_COLOR_CONFIG_NAME = "Your color lock";
 
+	String MANUAL_LOCK_POTIONS_CONFIG_NAME = "Include potions in item list";
+	String MANUAL_INCLUDE_FOOD_CONFIG_NAME = "Include food in item list";
+	String MANUAL_LOCK_AMMUNITION_CONFIG_NAME = "Include ammunition in item list";
+
+	/** Config row label — used to find this row in RL settings UI. */
+	String GROUP_ACCESS_CODE_CONFIG_NAME = "Group access code";
+
 	@ConfigItem(
 		position = 10,
 		keyName = "groupSlug",
-		name = "Group code",
-		description = "Group code from your Color Lock hub URL (/g/…). You can also paste the full invite URL."
+		name = GROUP_ACCESS_CODE_CONFIG_NAME,
+		description = "Hub access code (e.g. GeckoGlacier38#0723) or group slug / invite URL. "
+			+ "With Sync on, only the access code is required."
 	)
 	default String groupSlug()
 	{
@@ -35,8 +43,9 @@ public interface ColorLockConfig extends Config
 	@ConfigItem(
 		position = 12,
 		keyName = "memberPublicCode",
-		name = "Member code",
-		description = "Your member/public code from the hub; together with Group code authenticates against the hub."
+		name = "Member code (legacy)",
+		description = "Optional. Only for old groups that still use a word member code (e.g. Frog12) with a separate group slug. "
+			+ "Leave blank when using Group access code (Slug#0000)."
 	)
 	default String memberPublicCode()
 	{
@@ -47,10 +56,9 @@ public interface ColorLockConfig extends Config
 		position = 13,
 		keyName = "hubGroupSyncEnabled",
 		name = "Sync with group",
-		description = "Authenticate to the hub with Group code and Member code (plus Group password if the group has one), "
-			+ "pull your assigned color, and reload item rules. While enabled, the plugin sends a presence heartbeat so the "
-			+ "hub shows you online. Requires Group code and Member code filled. Changing any credential field disables sync "
-			+ "until you re-check the box."
+		description = "Authenticate with your Group access code (Slug#0000; Group password only if the group has one), "
+			+ "pull your assigned color, and reload item rules from the hub. While enabled, potion/food/ammo filters come from "
+			+ "the hub — not the manual toggles below. Changing credentials disables sync until you re-check this box."
 	)
 	default boolean hubGroupSyncEnabled()
 	{
@@ -78,5 +86,38 @@ public interface ColorLockConfig extends Config
 	default boolean showColorOverlay()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		position = 40,
+		keyName = "manualLockPotionsToColors",
+		name = MANUAL_LOCK_POTIONS_CONFIG_NAME,
+		description = "Download potion rows for color-lock rules. Only used when Sync with group is off."
+	)
+	default boolean manualLockPotionsToColors()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		position = 41,
+		keyName = "manualIncludeFood",
+		name = MANUAL_INCLUDE_FOOD_CONFIG_NAME,
+		description = "Download food / heal rows for color-lock rules. Only used when Sync with group is off (default on)."
+	)
+	default boolean manualIncludeFood()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		position = 42,
+		keyName = "manualLockAmmunitionToColors",
+		name = MANUAL_LOCK_AMMUNITION_CONFIG_NAME,
+		description = "Download stack ammunition (arrows, bolts, …) for color-lock rules. Only used when Sync with group is off."
+	)
+	default boolean manualLockAmmunitionToColors()
+	{
+		return false;
 	}
 }

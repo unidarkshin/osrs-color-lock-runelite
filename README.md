@@ -29,7 +29,7 @@ Color Locked talks to **one host:** `group.thegrandchart.com`. Nothing is sent a
 | `POST /api/plugin/v1/auth` | Group code, Member code, optional Group password | Trade for a short-lived Bearer JWT. |
 | `GET  /api/plugin/v1/state` | Bearer JWT | Read your assigned color and group palette. |
 | `PATCH /api/plugin/v1/me` (~every 60 s while logged in) | Bearer JWT, your in-game display name, `presence.online`, `currentColor`; also `sync.enabled` when you toggle the checkbox | Heartbeat for online status + desync audit. |
-| `GET  {state.items.url}`, `GET /api/v1/items`, or deprecated `GET /api/items` (last retry) | – | Item rules JSON. |
+| `GET  {state.items.url}`, `GET /api/v1/items?colored=1&groupFilters=1&…`, or deprecated `GET /api/items?…` (last retry) | Bearer JWT when synced | Filtered item rules JSON (group potion/food/ammo policy). |
 | `POST /api/plugin/v1/resolve/{slug}` | Group code + Member code + Group password when needed | Fallback when `POST …/auth` returns HTTP 404 before JWT `/auth` is fully deployed server-side. |
 
 The plugin does **not** send: account name, bank contents, chat, location, hashes, IP, telemetry, or anything else not listed above. The JWT is held in memory only and discarded on plugin disable or shutdown. Credentials are stored in the standard RuneLite config (same place as every other plugin).

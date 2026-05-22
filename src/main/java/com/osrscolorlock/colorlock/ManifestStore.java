@@ -12,8 +12,10 @@ import java.net.URI;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.concurrent.ScheduledExecutorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +25,7 @@ import java.util.zip.CRC32;
 public class ManifestStore
 {
 	private static final Logger log = LoggerFactory.getLogger(ManifestStore.class);
+	private static final int MANIFEST_HTTP_RETRIES = 3;
 
 	private final ClientThread clientThread;
 	private final ColorLockGroupSync groupSync;
@@ -119,33 +122,149 @@ public class ManifestStore
 	public void downloadAsync(Runnable onClientThreadFinish)
 	{
 		final String primary = groupSync.getEffectiveItemsManifestUrl(config);
-		final String fallbackV1 = groupSync.getDefaultItemsManifestUrl();
-		final String fallbackLegacy = groupSync.getLegacyItemsManifestUrl();
+		final String fallbackV1 = groupSync.getDefaultItemsManifestUrl(config);
+		final String fallbackLegacy = groupSync.getLegacyItemsManifestUrl(config);
 		executor.execute(() -> {
-			log.info("color-lock manifest fetching {}", primary);
-			if (tryLoadOrLog(primary))
+			log.debug("color-lock manifest fetching {}", primary);
+			boolean urlChanged = primary != null && !primary.equals(lastLoadedManifestUrl);
+			if (urlChanged)
 			{
-				clientThread.invokeLater(onClientThreadFinish);
-				return;
+				lastManifestPayloadCrc = Long.MIN_VALUE;
 			}
-			if (fallbackV1 != null && !fallbackV1.isEmpty() && !fallbackV1.equals(primary))
+			String loadedFrom = null;
+			if (tryLoadOrLogWithRetries(primary))
+			{
+				loadedFrom = primary;
+			}
+			else if (fallbackV1 != null && !fallbackV1.isEmpty() && !fallbackV1.equals(primary))
 			{
 				log.warn("color-lock manifest fetch failed at {} - retrying default {}", primary, fallbackV1);
 				groupSync.clearItemsUrlOverride();
-				if (tryLoadOrLog(fallbackV1))
+				if (tryLoadOrLogWithRetries(fallbackV1))
 				{
-					clientThread.invokeLater(onClientThreadFinish);
-					return;
+					loadedFrom = fallbackV1;
 				}
 			}
-			if (fallbackLegacy != null && !fallbackLegacy.isEmpty()
+			if (loadedFrom == null && fallbackLegacy != null && !fallbackLegacy.isEmpty()
 				&& !fallbackLegacy.equals(primary) && !fallbackLegacy.equals(fallbackV1))
 			{
 				log.warn("color-lock manifest fetch retrying deprecated {}", fallbackLegacy);
-				tryLoadOrLog(fallbackLegacy);
+				if (tryLoadOrLogWithRetries(fallbackLegacy))
+				{
+					loadedFrom = fallbackLegacy;
+				}
 			}
+			String reconcileBase = loadedFrom != null ? loadedFrom
+				: (fallbackV1 != null && !fallbackV1.isEmpty() ? fallbackV1 : primary);
+			reconcilePotionRows(reconcileBase);
 			clientThread.invokeLater(onClientThreadFinish);
 		});
+	}
+
+	private boolean tryLoadOrLogWithRetries(String url)
+	{
+		for (int attempt = 1; attempt <= MANIFEST_HTTP_RETRIES; attempt++)
+		{
+			if (tryLoadOrLog(url))
+			{
+				return true;
+			}
+			if (!isRetryableManifestError(loadError) || attempt >= MANIFEST_HTTP_RETRIES)
+			{
+				return false;
+			}
+			log.debug("color-lock manifest retry {}/{} for {}", attempt + 1, MANIFEST_HTTP_RETRIES, url);
+			try
+			{
+				Thread.sleep(2000L * attempt);
+			}
+			catch (InterruptedException e)
+			{
+				Thread.currentThread().interrupt();
+				return false;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isRetryableManifestError(String err)
+	{
+		if (err == null)
+		{
+			return false;
+		}
+		String e = err.toLowerCase(Locale.ENGLISH);
+		return e.contains("502") || e.contains("503") || e.contains("504")
+			|| e.contains("timed out") || e.contains("timeout");
+	}
+
+	/** Main manifest omits potions (manual sync-off); add or strip potion rows in a second small GET. */
+	private void reconcilePotionRows(String hubItemsUrl)
+	{
+		if (hubItemsUrl == null || hubItemsUrl.isEmpty() || byId.isEmpty())
+		{
+			return;
+		}
+		if (ColorLockItemsApi.potionsWantedInManifest(config, groupSync))
+		{
+			refreshPotionRowsFromSupplement(hubItemsUrl);
+		}
+		else
+		{
+			stripPotionRowsFromCache();
+		}
+	}
+
+	private void stripPotionRowsFromCache()
+	{
+		int removed = 0;
+		HashMap<Integer, ManifestItem> next = new HashMap<>(Math.max(byId.size(), 64));
+		for (Map.Entry<Integer, ManifestItem> e : byId.entrySet())
+		{
+			if ("potion".equalsIgnoreCase(e.getValue().getCategory()))
+			{
+				removed++;
+				continue;
+			}
+			next.put(e.getKey(), e.getValue());
+		}
+		if (removed == 0)
+		{
+			return;
+		}
+		byId = Collections.unmodifiableMap(next);
+		lastManifestPayloadCrc = Long.MIN_VALUE;
+		log.debug("color-lock removed {} potion rows (include potions off)", removed);
+	}
+
+	private void refreshPotionRowsFromSupplement(String hubItemsUrl)
+	{
+		String url = ColorLockItemsApi.buildPotionSupplementItemsUrl(hubItemsUrl, config);
+		try
+		{
+			List<ManifestItem> potions = fetchItemsListBlocking(url);
+			HashMap<Integer, ManifestItem> next = new HashMap<>(Math.max(byId.size(), 64));
+			for (ManifestItem row : byId.values())
+			{
+				if (!"potion".equalsIgnoreCase(row.getCategory()))
+				{
+					next.put(row.getId(), row);
+				}
+			}
+			for (ManifestItem row : potions)
+			{
+				next.put(row.getId(), row);
+			}
+			byId = Collections.unmodifiableMap(next);
+			lastManifestPayloadCrc = Long.MIN_VALUE;
+			loadError = null;
+			log.debug("color-lock potion supplement: {} rows ({})", potions.size(), url);
+		}
+		catch (IOException e)
+		{
+			loadError = e.getMessage();
+			log.warn("color-lock potion supplement fetch failed at {}", url, e);
+		}
 	}
 
 	private boolean tryLoadOrLog(String url)
@@ -164,9 +283,64 @@ public class ManifestStore
 		}
 	}
 
+	/** Items list for lookup sidebar ({@code usableBy} + group filters); does not replace the cached manifest. */
+	public void fetchPaletteLookupAsync(ColorLockColor assignment, Consumer<List<ManifestItem>> onClientThread)
+	{
+		final String base = groupSync.getEffectiveItemsManifestUrl(config);
+		final String url = ColorLockItemsApi.buildPaletteLookupItemsUrl(base, config, assignment);
+		executor.execute(() -> {
+			List<ManifestItem> rows;
+			try
+			{
+				rows = fetchItemsListBlocking(url);
+				log.debug("palette lookup loaded {} rows from {}", rows.size(), url);
+			}
+			catch (IOException e)
+			{
+				log.warn("palette lookup fetch failed at {}", url, e);
+				rows = List.of();
+			}
+			final List<ManifestItem> result = rows;
+			clientThread.invokeLater(() -> onClientThread.accept(result));
+		});
+	}
+
+	List<ManifestItem> fetchItemsListBlocking(String url) throws IOException
+	{
+		byte[] raw = downloadItemsPayload(url);
+		return ManifestJson.readItemsUtf8(raw);
+	}
+
 	void loadBlocking(String url) throws IOException
 	{
 		loadError = null;
+		HttpURLConnection conn = openItemsGet(url);
+		try
+		{
+			int headerContract = parsePositiveHeader(conn, ColorLockApiContracts.HEADER_API_CONTRACT);
+			int headerSchema = parsePositiveHeader(conn, ColorLockApiContracts.HEADER_ITEMS_SCHEMA);
+			if (headerContract > 0
+				&& headerContract != ColorLockApiContracts.EXPECTED_ITEMS_API_CONTRACT_VERSION)
+			{
+				log.warn("Items API contract header {}={} plugin expects {}",
+					ColorLockApiContracts.HEADER_API_CONTRACT, headerContract,
+					ColorLockApiContracts.EXPECTED_ITEMS_API_CONTRACT_VERSION);
+			}
+			byte[] raw;
+			try (InputStream in = conn.getInputStream())
+			{
+				raw = in.readAllBytes();
+			}
+			applyLoadedManifest(url, raw, headerSchema);
+		}
+		finally
+		{
+			conn.disconnect();
+		}
+	}
+
+	private HttpURLConnection openItemsGet(String url) throws IOException
+	{
 		HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
 		conn.setRequestMethod("GET");
 		conn.setUseCaches(false);
@@ -175,23 +349,39 @@ public class ManifestStore
 		conn.setRequestProperty("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)");
 		conn.setRequestProperty("Cache-Control", "no-cache");
 		conn.setRequestProperty("Pragma", "no-cache");
-
+		if (ColorLockItemsApi.isHubItemsApiPath(url) && !ColorLockItemsApi.isStaticItemsJsonPath(url)
+			&& config.hubGroupSyncEnabled())
+		{
+			String token = groupSync.pluginAccessToken();
+			if (token != null && !token.isEmpty())
+			{
+				conn.setRequestProperty("Authorization", "Bearer " + token);
+			}
+		}
 		int httpCode = conn.getResponseCode();
 		if (httpCode != HttpURLConnection.HTTP_OK)
 		{
+			conn.disconnect();
 			throw new IOException("items manifest HTTP " + httpCode);
 		}
+		return conn;
+	}
 
-		byte[] raw;
+	private byte[] downloadItemsPayload(String url) throws IOException
+	{
+		HttpURLConnection conn = openItemsGet(url);
 		try (InputStream in = conn.getInputStream())
 		{
-			raw = in.readAllBytes();
+			return in.readAllBytes();
 		}
 		finally
 		{
 			conn.disconnect();
 		}
+	}
 
+	private void applyLoadedManifest(String url, byte[] raw, int headerSchema) throws IOException
+	{
 		long crcVal = crc32(raw);
 		List<ManifestItem> list = ManifestJson.readItemsUtf8(raw);
 
@@ -215,7 +405,19 @@ public class ManifestStore
 		}
 
 		byId = Collections.unmodifiableMap(next);
-		manifestSchemaVersion = schemaSeen == null ? -1 : schemaSeen;
+		int rowSchema = schemaSeen == null ? -1 : schemaSeen;
+		manifestSchemaVersion = headerSchema > 0 ? headerSchema : rowSchema;
+		if (headerSchema > 0 && rowSchema > 0 && headerSchema != rowSchema)
+		{
+			log.warn("Items schema header {}={} differs from row schemaVersion {}",
+				ColorLockApiContracts.HEADER_ITEMS_SCHEMA, headerSchema, rowSchema);
+		}
+		if (manifestSchemaVersion > 0
+			&& manifestSchemaVersion != ColorLockApiContracts.EXPECTED_ITEMS_JSON_SCHEMA_VERSION)
+		{
+			log.warn("Items schemaVersion={} plugin expects {} — see DATA_CONTRACT.md",
+				manifestSchemaVersion, ColorLockApiContracts.EXPECTED_ITEMS_JSON_SCHEMA_VERSION);
+		}
 		lastLoadedManifestUrl = url;
 
 		boolean firstLoad = lastSnapshotItemCount < 0;
@@ -237,6 +439,28 @@ public class ManifestStore
 		else
 		{
 			log.debug("manifest refresh unchanged ({} entries, crc32={})", n, String.format("%08x", crcVal));
+		}
+	}
+
+	private static int parsePositiveHeader(HttpURLConnection conn, String name)
+	{
+		if (conn == null || name == null)
+		{
+			return -1;
+		}
+		String v = conn.getHeaderField(name);
+		if (v == null || v.isEmpty())
+		{
+			return -1;
+		}
+		try
+		{
+			int n = Integer.parseInt(v.trim());
+			return n > 0 ? n : -1;
+		}
+		catch (NumberFormatException e)
+		{
+			return -1;
 		}
 	}
 

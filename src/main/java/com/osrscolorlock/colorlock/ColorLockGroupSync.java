@@ -77,6 +77,9 @@ public class ColorLockGroupSync
 	private volatile int lastStateHttpStatus = 0;
 	/** True when member.status came back as "active" on the most recent sync. */
 	private volatile boolean lastMemberActive = false;
+	/** Fingerprint of hub potion/food/ammo toggles; -1 until first /state or /auth group payload. */
+	private volatile int lastGroupItemPolicyFingerprint = -1;
+	private volatile boolean groupItemPolicyDirty;
 
 	@Inject
 	public ColorLockGroupSync(ClientThread clientThread, ScheduledExecutorService executor)
@@ -91,36 +94,50 @@ public class ColorLockGroupSync
 	 */
 	public String getEffectiveItemsManifestUrl(ColorLockConfig config)
 	{
+		if (config != null && !config.hubGroupSyncEnabled())
+		{
+			return getDefaultItemsManifestUrl(config);
+		}
 		String o = hubItemsManifestUrlOverride;
 		if (o != null && !o.isBlank())
 		{
-			return o.trim();
+			return ColorLockItemsApi.applyPluginItemsQuery(o.trim(), config);
 		}
-		return getDefaultItemsManifestUrl();
+		return getDefaultItemsManifestUrl(config);
 	}
 
-	/** Stable canonical URL ({@code {base}/api/v1/items}) ignoring any hub-supplied override. */
-	public String getDefaultItemsManifestUrl()
+	/** Stable canonical items API URL ignoring hub override. */
+	public String getDefaultItemsManifestUrl(ColorLockConfig config)
 	{
 		String base = ColorLockSites.deriveBaseSiteUrl(ColorLockWeb.DEFAULT_ITEMS_JSON);
 		String api = ColorLockSites.concatBasePath(base, ColorLockWeb.API_V1_ITEMS);
 		if (!api.isEmpty())
 		{
-			return api;
+			return ColorLockItemsApi.applyPluginItemsQuery(api, config);
 		}
 		return ColorLockWeb.DEFAULT_ITEMS_JSON;
 	}
 
-	/** Deprecated alias URL ({@code {base}/api/items}) — final manifest retry when versioned path fails. */
-	public String getLegacyItemsManifestUrl()
+	/** Deprecated alias URL — final manifest retry when versioned path fails. */
+	public String getLegacyItemsManifestUrl(ColorLockConfig config)
 	{
 		String base = ColorLockSites.deriveBaseSiteUrl(ColorLockWeb.DEFAULT_ITEMS_JSON);
 		String api = ColorLockSites.concatBasePath(base, ColorLockWeb.API_ITEMS_LEGACY);
 		if (!api.isEmpty())
 		{
-			return api;
+			return ColorLockItemsApi.applyPluginItemsQuery(api, config);
 		}
 		return ColorLockWeb.DEFAULT_ITEMS_JSON;
+	}
+
+	/** Nullable Bearer for versioned items API when synced; hub applies group potion/food/ammo policy. */
+	public String pluginAccessToken()
+	{
+		if (jwtMissingOrExpired())
+		{
+			return null;
+		}
+		return accessJwt;
 	}
 
 	/** Drops a broken/unreachable {@code state.items.url}; next manifest fetch will use the default. */
@@ -241,9 +258,7 @@ public class ColorLockGroupSync
 
 	private static boolean groupCredentialsPresent(ColorLockConfig config)
 	{
-		String slug = config.groupSlug() == null ? "" : config.groupSlug().trim();
-		String memberCode = config.memberPublicCode() == null ? "" : config.memberPublicCode().trim();
-		return !slug.isEmpty() && !memberCode.isEmpty();
+		return ColorLockCredentials.from(config).isFilled();
 	}
 
 	private boolean jwtMissingOrExpired()
@@ -277,6 +292,16 @@ public class ColorLockGroupSync
 		lastAuthErrorMessage = null;
 		lastStateHttpStatus = 0;
 		lastMemberActive = false;
+		lastGroupItemPolicyFingerprint = -1;
+		groupItemPolicyDirty = false;
+	}
+
+	/** After {@code GET /state}: hub group potion/food/ammo toggles changed since last poll. */
+	public boolean consumeGroupItemPolicyDirty()
+	{
+		boolean d = groupItemPolicyDirty;
+		groupItemPolicyDirty = false;
+		return d;
 	}
 
 	void refreshAsync(ColorLockConfig config, Runnable onFinishClientThread)
@@ -361,20 +386,19 @@ public class ColorLockGroupSync
 			return;
 		}
 
-		String slug = config.groupSlug().trim();
-		String memberCode = config.memberPublicCode().trim();
+		ColorLockCredentials cred = ColorLockCredentials.from(config);
 		String jp = config.groupJoinPasscode() == null ? "" : config.groupJoinPasscode().trim();
 
-		int authRc = postPluginAuthBlocking(base, slug, memberCode, jp);
+		int authRc = postPluginAuthBlocking(base, cred.groupField, cred.memberField, jp);
 		lastAuthHttpStatus = authRc;
 		if (authRc == HttpURLConnection.HTTP_NOT_FOUND)
 		{
-			if (postPluginResolveV1Blocking(base, slug, memberCode, jp))
+			if (postPluginResolveV1Blocking(base, cred.pathSlug, cred.memberField, jp))
 			{
 				return;
 			}
 			clearSession();
-			log.warn("plugin/v1/auth 404 and plugin/v1/resolve failed for slug {}", slug);
+			log.warn("plugin/v1/auth 404 and plugin/v1/resolve failed for slug {}", cred.pathSlug);
 			return;
 		}
 		if (authRc != HttpURLConnection.HTTP_OK || accessJwt == null || accessJwt.isEmpty())
@@ -382,7 +406,7 @@ public class ColorLockGroupSync
 			clearSession();
 			if (authRc > 0)
 			{
-				log.warn("plugin/v1/auth HTTP {} for group slug {}", authRc, slug);
+				log.warn("plugin/v1/auth HTTP {} for group slug {}", authRc, cred.pathSlug);
 			}
 			return;
 		}
@@ -395,12 +419,12 @@ public class ColorLockGroupSync
 			if (stateRc == HttpURLConnection.HTTP_UNAUTHORIZED && !retriedJwt)
 			{
 				clearJwt();
-				authRc = postPluginAuthBlocking(base, slug, memberCode, jp);
+				authRc = postPluginAuthBlocking(base, cred.groupField, cred.memberField, jp);
 				lastAuthHttpStatus = authRc;
 				if (authRc != HttpURLConnection.HTTP_OK || jwtMissingOrExpired())
 				{
 					clearSession();
-					log.warn("plugin/v1/state 401 -> re-auth failed for slug {}", slug);
+					log.warn("plugin/v1/state 401 -> re-auth failed for slug {}", cred.pathSlug);
 					return;
 				}
 				retriedJwt = true;
@@ -421,7 +445,7 @@ public class ColorLockGroupSync
 		try
 		{
 			conn = openJsonPost(uri);
-			String bodyJson = buildAuthJsonBody(slug, publicCode, joinPasscode);
+			String bodyJson = ColorLockAuthBodies.buildPluginAuthJson(slug, publicCode, joinPasscode);
 			try (OutputStreamWriter w = new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8))
 			{
 				w.write(bodyJson);
@@ -465,31 +489,6 @@ public class ColorLockGroupSync
 				conn.disconnect();
 			}
 		}
-	}
-
-	private static String buildAuthJsonBody(String slugOrUrl, String publicCode, String joinPasscode)
-	{
-		String escCode = gsonEscape(publicCode == null ? "" : publicCode.trim());
-		StringBuilder sb = new StringBuilder(96);
-		sb.append("{\"publicCode\":\"").append(escCode).append("\"");
-		String t = slugOrUrl == null ? "" : slugOrUrl.trim();
-		if (!t.isEmpty())
-		{
-			boolean looksLikeUrl = t.startsWith("http://") || t.startsWith("https://") || t.contains("/g/");
-			String field = looksLikeUrl ? "inviteUrl" : "slug";
-			sb.append(",\"").append(field).append("\":\"").append(gsonEscape(t)).append("\"");
-		}
-		if (joinPasscode != null && !joinPasscode.trim().isEmpty())
-		{
-			sb.append(",\"joinPasscode\":\"").append(gsonEscape(joinPasscode.trim())).append("\"");
-		}
-		sb.append("}");
-		return sb.toString();
-	}
-
-	private static String gsonEscape(String s)
-	{
-		return s.replace("\\", "\\\\").replace("\"", "\\\"");
 	}
 
 	/**
@@ -556,7 +555,7 @@ public class ColorLockGroupSync
 		boolean isSyncToggleEvent = syncToggleEnabled != null;
 		if (config == null)
 		{
-			log.info("Heartbeat skipped: config not initialised.");
+			log.debug("Heartbeat skipped: config not initialised.");
 			return -1;
 		}
 		// Regular heartbeats stop firing as soon as the user unchecks. The one-shot
@@ -564,23 +563,23 @@ public class ColorLockGroupSync
 		// our "Online" flag, so we only short-circuit when there's no explicit toggle event.
 		if (!config.hubGroupSyncEnabled() && !isSyncToggleEvent)
 		{
-			log.info("Heartbeat skipped: hub sync disabled.");
+			log.debug("Heartbeat skipped: hub sync disabled.");
 			return -1;
 		}
 		if (jwtMissingOrExpired())
 		{
-			log.info("Heartbeat skipped: JWT missing or expired (sync first).");
+			log.debug("Heartbeat skipped: JWT missing or expired (sync first).");
 			return HttpURLConnection.HTTP_UNAUTHORIZED;
 		}
 		String clean = normalizeRunescapeName(runescapeName);
 		if (clean.isEmpty())
 		{
-			log.info("Heartbeat skipped: no in-game player name yet.");
+			log.debug("Heartbeat skipped: no in-game player name yet.");
 			return -1;
 		}
 		if (clean.length() > 12 || !RSN_PATTERN.matcher(clean).matches())
 		{
-			log.info("Heartbeat skipped: in-game player name '{}' (raw '{}') fails hub validation (1-12 chars, [A-Za-z0-9 _-]).",
+			log.debug("Heartbeat skipped: in-game player name '{}' (raw '{}') fails hub validation (1-12 chars, [A-Za-z0-9 _-]).",
 				clean, runescapeName);
 			return -1;
 		}
@@ -592,12 +591,12 @@ public class ColorLockGroupSync
 		}
 		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_ME);
 		StringBuilder bodySb = new StringBuilder(160)
-			.append("{\"runescapeUsername\":\"").append(gsonEscape(clean))
+			.append("{\"runescapeUsername\":\"").append(ColorLockAuthBodies.gsonEscape(clean))
 			.append("\",\"presence\":{\"online\":").append(presenceOnline).append("}");
 		if (currentColorKey != null && !currentColorKey.isBlank())
 		{
 			String cur = currentColorKey.trim().toLowerCase(Locale.ENGLISH);
-			bodySb.append(",\"currentColor\":\"").append(gsonEscape(cur)).append("\"");
+			bodySb.append(",\"currentColor\":\"").append(ColorLockAuthBodies.gsonEscape(cur)).append("\"");
 		}
 		if (syncToggleEnabled != null)
 		{
@@ -633,7 +632,7 @@ public class ColorLockGroupSync
 			}
 			else
 			{
-				log.info("plugin/v1/me PATCH HTTP {} for {} ({})", rc, clean,
+				log.debug("plugin/v1/me PATCH HTTP {} for {} ({})", rc, clean,
 					presenceOnline ? "online" : "offline");
 			}
 			return rc;
@@ -694,7 +693,8 @@ public class ColorLockGroupSync
 				return null;
 			}
 			String h = host.toLowerCase(Locale.ENGLISH);
-			boolean unreachableHost = h.equals("localhost") || h.equals("127.0.0.1") || h.equals("::1")
+			boolean unreachableHost = h.equals("localhost") || h.equals("127.0.0.1") || h.equals("0.0.0.0")
+				|| h.equals("::1")
 				|| h.startsWith("10.") || h.startsWith("192.168.")
 				|| (h.startsWith("172.") && in172_16_thru_31(h));
 			if (unreachableHost)
@@ -797,7 +797,7 @@ public class ColorLockGroupSync
 		Integer prev = lastPluginProfileRev;
 		if (prev != null && rev > prev)
 		{
-			log.info("Group hub pluginProfileRev {} -> {} - assignedColor may have changed.", prev, rev);
+			log.debug("Group hub pluginProfileRev {} -> {} - assignedColor may have changed.", prev, rev);
 		}
 		lastPluginProfileRev = rev;
 	}
@@ -806,7 +806,14 @@ public class ColorLockGroupSync
 	{
 		if (group != null)
 		{
-			groupSnapshot = new GroupSnapshot(group.slug, group.name, group.enabledColors);
+			noteGroupItemPolicyChange(group);
+			groupSnapshot = new GroupSnapshot(
+				group.slug,
+				group.name,
+				group.enabledColors,
+				group.colorLockIncludePotions == Boolean.TRUE,
+				group.colorLockExcludeFood == Boolean.TRUE,
+				group.colorLockIncludeAmmunition == Boolean.TRUE);
 		}
 		if (member == null)
 		{
@@ -852,6 +859,40 @@ public class ColorLockGroupSync
 		{
 			log.info("Synced with hub: no assigned color yet - Your color lock in settings still applies until the hub assigns one.");
 		}
+	}
+
+	private void noteGroupItemPolicyChange(GroupDto group)
+	{
+		int fp = groupItemPolicyFingerprint(group);
+		if (lastGroupItemPolicyFingerprint >= 0 && fp != lastGroupItemPolicyFingerprint)
+		{
+			groupItemPolicyDirty = true;
+			log.info("Hub group item policy changed (fingerprint {} -> {}) — items manifest should reload.",
+				lastGroupItemPolicyFingerprint, fp);
+		}
+		lastGroupItemPolicyFingerprint = fp;
+	}
+
+	static int groupItemPolicyFingerprint(GroupDto group)
+	{
+		if (group == null)
+		{
+			return 0;
+		}
+		int fp = 0;
+		if (group.colorLockIncludePotions == Boolean.TRUE)
+		{
+			fp |= 1;
+		}
+		if (group.colorLockExcludeFood == Boolean.TRUE)
+		{
+			fp |= 2;
+		}
+		if (group.colorLockIncludeAmmunition == Boolean.TRUE)
+		{
+			fp |= 4;
+		}
+		return fp;
 	}
 
 	private static Set<String> deriveGroupPaletteIntersect(GroupDto group)
@@ -933,14 +974,7 @@ public class ColorLockGroupSync
 			conn = openJsonPost(uri);
 			try (OutputStreamWriter w = new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8))
 			{
-				if (jpRaw != null && !jpRaw.isEmpty())
-				{
-					w.write(GSON.toJson(new ResolveBody(memberCode, jpRaw)));
-				}
-				else
-				{
-					w.write(GSON.toJson(new ResolveBodyOnlyCode(memberCode)));
-				}
+				w.write(ColorLockAuthBodies.buildPluginResolveJson(slug, memberCode, jpRaw));
 			}
 
 			int rc = conn.getResponseCode();
@@ -1063,6 +1097,15 @@ public class ColorLockGroupSync
 
 		@SerializedName(value = "enabledColors", alternate = {"enabled_colors"})
 		List<String> enabledColors;
+
+		@SerializedName(value = "colorLockIncludePotions", alternate = {"color_lock_include_potions"})
+		Boolean colorLockIncludePotions;
+
+		@SerializedName(value = "colorLockExcludeFood", alternate = {"color_lock_exclude_food"})
+		Boolean colorLockExcludeFood;
+
+		@SerializedName(value = "colorLockIncludeAmmunition", alternate = {"color_lock_include_ammunition"})
+		Boolean colorLockIncludeAmmunition;
 	}
 
 	static final class MemberDto
@@ -1151,36 +1194,18 @@ public class ColorLockGroupSync
 		GroupDto group;
 	}
 
-	static final class ResolveBodyOnlyCode
-	{
-		final String publicCode;
-
-		ResolveBodyOnlyCode(String publicCode)
-		{
-			this.publicCode = publicCode;
-		}
-	}
-
-	static final class ResolveBody
-	{
-		final String publicCode;
-		final String joinPasscode;
-
-		ResolveBody(String publicCode, String joinPasscode)
-		{
-			this.publicCode = publicCode;
-			this.joinPasscode = joinPasscode;
-		}
-	}
-
 	/** Read-only snapshot of group meta last seen on /state or /auth. */
 	public static final class GroupSnapshot
 	{
 		public final String slug;
 		public final String name;
 		public final List<String> enabledColorsLowercase;
+		public final boolean colorLockIncludePotions;
+		public final boolean colorLockExcludeFood;
+		public final boolean colorLockIncludeAmmunition;
 
-		GroupSnapshot(String slug, String name, List<String> enabled)
+		GroupSnapshot(String slug, String name, List<String> enabled,
+			boolean colorLockIncludePotions, boolean colorLockExcludeFood, boolean colorLockIncludeAmmunition)
 		{
 			this.slug = slug == null ? "" : slug;
 			this.name = name == null ? "" : name;
@@ -1196,6 +1221,9 @@ public class ColorLockGroupSync
 				}
 			}
 			this.enabledColorsLowercase = Collections.unmodifiableList(out);
+			this.colorLockIncludePotions = colorLockIncludePotions;
+			this.colorLockExcludeFood = colorLockExcludeFood;
+			this.colorLockIncludeAmmunition = colorLockIncludeAmmunition;
 		}
 	}
 

@@ -36,6 +36,10 @@ set REPO2=%USERPROFILE%\.runelite\repository2
 
 set RL_JAVA=%LOCALAPPDATA%\RuneLite\jre\bin\java.exe
 
+REM Heap for dev client (full repository2 classpath + sideload). Override: set RUNELITE_DEV_XMX=4096m
+
+if not defined RUNELITE_DEV_XMX set RUNELITE_DEV_XMX=2048m
+
 
 
 pushd "%ROOT%"
@@ -132,7 +136,9 @@ if not exist "%USERPROFILE%\.runelite\credentials.properties" (
 
 echo Starting CLIENT directly ^(developer-mode ON^); sideload: %SIDELOAD%
 
-REM Same-ish heap as launcher; no -Drunelite.launcher.version so sideload runs.
+echo Max heap: %RUNELITE_DEV_XMX% ^(set RUNELITE_DEV_XMX=4096m to raise^)
 
-"%RL_JAVA%" -ea -XX:+DisableAttachMechanism -Xmx768m -Xss2m -cp "%REPO2%\*" net.runelite.client.RuneLite --developer-mode %*
+REM No -Drunelite.launcher.version so sideload runs.
+
+"%RL_JAVA%" -ea -XX:+DisableAttachMechanism -Xmx%RUNELITE_DEV_XMX% -Xss2m -cp "%REPO2%\*" net.runelite.client.RuneLite --developer-mode %*
 

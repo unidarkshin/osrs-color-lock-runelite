@@ -144,7 +144,7 @@ public class ColorLockLookupPanel extends PluginPanel
 		}
 		myPaletteOnlyCheckbox.setSelected(palCfg);
 		myPaletteOnlyCheckbox.setToolTipText(
-			"Only items your color lock can use. Mutually exclusive with All-colors-only.");
+			"Fetches hub items with usableBy=your color and groupFilters (potion/food/ammo per sync). Mutually exclusive with All-colors-only.");
 		myPaletteOnlyCheckbox.setAlignmentX(Component.LEFT_ALIGNMENT);
 		JPanel paletteRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
 		paletteRow.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -281,8 +281,13 @@ public class ColorLockLookupPanel extends PluginPanel
 		JButton refreshBtn = new JButton("Refresh now");
 		refreshBtn.addActionListener(e -> {
 			groupStateLabel.setText("Refreshing\u2026");
-			groupSync.pollStateAsync(config,
-				() -> SwingUtilities.invokeLater(this::refreshGroupTab));
+			groupSync.pollStateAsync(config, () -> SwingUtilities.invokeLater(() -> {
+				refreshGroupTab();
+				if (groupSync.consumeGroupItemPolicyDirty())
+				{
+					manifestStore.downloadAsync(() -> { });
+				}
+			}));
 		});
 		JPanel refreshRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
 		refreshRow.setOpaque(false);
@@ -564,53 +569,97 @@ public class ColorLockLookupPanel extends PluginPanel
 			resultsPanel.repaint();
 		});
 
+		if (myPaletteOnlyCheckbox.isSelected())
+		{
+			ColorLockColor lock = groupSync.effectiveAssignment(config);
+			manifestStore.fetchPaletteLookupAsync(lock, rows -> collectLookupHitsFromRows(rows, query, hits ->
+				SwingUtilities.invokeLater(() -> populateResults(hits, hits.size() >= MAX_RESULTS))));
+			return;
+		}
+
 		clientThread.invokeLater(() -> {
 			List<LookupHit> hits = new ArrayList<>();
-			int maxId = client.getItemCount();
-			for (int id = 0; id < maxId && hits.size() < MAX_RESULTS; id++)
-			{
-				ItemComposition def = client.getItemDefinition(id);
-				if (def == null)
-				{
-					continue;
-				}
-				String name = Text.removeTags(def.getName());
-				if (name == null || name.isEmpty() || name.equals("null"))
-				{
-					continue;
-				}
-				if (!query.isEmpty() && !name.toLowerCase(Locale.ENGLISH).contains(query))
-				{
-					continue;
-				}
-				int canon = itemManager.canonicalize(id);
-				// Omit noted / placeholder / worn-alias ids — same logical item as canonical row
-				if (id != canon)
-				{
-					continue;
-				}
-				ManifestItem row = manifestStore.getListedManifestItem(id, itemManager);
-				if (row == null || row.getUsableColors().isEmpty())
-				{
-					continue;
-				}
-				if (!passesLookupFilters(row, id))
-				{
-					continue;
-				}
-				hits.add(new LookupHit(id, name, canon, row));
-			}
-
+			scanClientItemsForLookup(query, hits);
 			boolean truncated = hits.size() >= MAX_RESULTS;
 			SwingUtilities.invokeLater(() -> populateResults(hits, truncated));
 		});
 	}
 
-	/** Applies lookup filter checkboxes ({@linkplain #myPaletteOnlyCheckbox} vs {@linkplain #allColorsListingsCheckbox}). */
-	private boolean passesLookupFilters(ManifestItem row, int itemId)
+	private void collectLookupHitsFromRows(List<ManifestItem> rows, String query, Consumer<List<LookupHit>> done)
+	{
+		List<LookupHit> hits = new ArrayList<>();
+		for (ManifestItem row : rows)
+		{
+			if (hits.size() >= MAX_RESULTS || row == null || row.getUsableColors().isEmpty())
+			{
+				continue;
+			}
+			String name = row.getName();
+			if (name == null || name.isEmpty())
+			{
+				continue;
+			}
+			String nameLc = name.toLowerCase(Locale.ENGLISH);
+			if (!query.isEmpty() && !nameLc.contains(query))
+			{
+				continue;
+			}
+			int id = row.getId();
+			int canon = itemManager.canonicalize(id);
+			if (!passesLookupFilters(row, id, true))
+			{
+				continue;
+			}
+			hits.add(new LookupHit(id, name, canon, row));
+		}
+		done.accept(hits);
+	}
+
+	private void scanClientItemsForLookup(String query, List<LookupHit> hits)
+	{
+		int maxId = client.getItemCount();
+		for (int id = 0; id < maxId && hits.size() < MAX_RESULTS; id++)
+		{
+			ItemComposition def = client.getItemDefinition(id);
+			if (def == null)
+			{
+				continue;
+			}
+			String name = Text.removeTags(def.getName());
+			if (name == null || name.isEmpty() || name.equals("null"))
+			{
+				continue;
+			}
+			if (!query.isEmpty() && !name.toLowerCase(Locale.ENGLISH).contains(query))
+			{
+				continue;
+			}
+			int canon = itemManager.canonicalize(id);
+			if (id != canon)
+			{
+				continue;
+			}
+			ManifestItem row = manifestStore.getListedManifestItem(id, itemManager);
+			if (row == null || row.getUsableColors().isEmpty())
+			{
+				continue;
+			}
+			if (!passesLookupFilters(row, id, false))
+			{
+				continue;
+			}
+			hits.add(new LookupHit(id, name, canon, row));
+		}
+	}
+
+	/**
+	 * Lookup filter checkboxes. When {@code paletteFilteredByHub}, palette rows already came from
+	 * {@code usableBy} + {@code groupFilters} on the items API.
+	 */
+	private boolean passesLookupFilters(ManifestItem row, int itemId, boolean paletteFilteredByHub)
 	{
 		boolean enforced = ManifestRules.isLockEnforced(row);
-		if (myPaletteOnlyCheckbox.isSelected())
+		if (myPaletteOnlyCheckbox.isSelected() && !paletteFilteredByHub)
 		{
 			if (!enforced)
 			{

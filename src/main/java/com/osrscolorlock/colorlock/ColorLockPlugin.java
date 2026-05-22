@@ -51,17 +51,23 @@ import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 @PluginDescriptor(
 	name = "Color Locked",
-	description = "Group Iron color-lock: hub rules, menu blocking, red marks, and item lookup.",
-	tags = {"ironman", "gim", "color-lock", "groupiron"}
+	description = "Group Iron color-lock enforcement. Blocks Eat/Drink/Equip/Wield/Wear on items restricted by your "
+		+ "assigned color. Strips Mine/Chop when carrying a restricted pickaxe or axe. Marks restricted items with a red "
+		+ "overlay in inventory, bank, and worn equipment. Includes a sidebar for looking up which items your color can "
+		+ "use. Syncs your assigned color and item rules from a hub group, or runs standalone with manual settings.",
+	tags = {"ironman", "gim", "color-lock", "groupiron", "color", "lock", "restriction"}
 )
 public class ColorLockPlugin extends Plugin
 {
 	private static final Logger log = LoggerFactory.getLogger(ColorLockPlugin.class);
 
-	static final int EXPECTED_SCHEMA_VERSION = 2;
+	static final int EXPECTED_SCHEMA_VERSION = ColorLockApiContracts.EXPECTED_ITEMS_JSON_SCHEMA_VERSION;
 
 	private static final java.util.Set<String> HUB_CRED_KEYS = java.util.Set.of(
 		"groupSlug", "groupJoinPasscode", "memberPublicCode");
+
+	private static final java.util.Set<String> MANUAL_ITEM_FILTER_KEYS = java.util.Set.of(
+		"manualLockPotionsToColors", "manualIncludeFood", "manualLockAmmunitionToColors");
 
 	/**
 	 * RuneLite replays the active profile by re-firing {@code ConfigChanged} for every key on
@@ -80,13 +86,29 @@ public class ColorLockPlugin extends Plugin
 	/** Strip config keys we no longer expose so old profiles don't carry stale state. */
 	private void purgeDeprecatedConfigKeys()
 	{
-		for (String key : new String[]{"itemsUrl", "syncToGroupAction"})
+		for (String key : new String[]{"itemsUrl", "syncToGroupAction", "manualLockFoodToColors"})
 		{
 			if (configManager.getConfiguration("colorlockhelper", key) != null)
 			{
 				configManager.unsetConfiguration("colorlockhelper", key);
 			}
 		}
+	}
+
+	/** Default manual item list includes food ({@code excludeFood=0}). Migrates {@code manualLockFoodToColors}. */
+	private void migrateManualIncludeFoodConfig()
+	{
+		if (configManager.getConfiguration("colorlockhelper", "manualIncludeFood") != null)
+		{
+			return;
+		}
+		String legacy = configManager.getConfiguration("colorlockhelper", "manualLockFoodToColors");
+		if (legacy != null)
+		{
+			configManager.setConfiguration("colorlockhelper", "manualIncludeFood", legacy);
+			return;
+		}
+		configManager.setConfiguration("colorlockhelper", "manualIncludeFood", Boolean.TRUE.toString());
 	}
 
 	@Inject
@@ -158,6 +180,7 @@ public class ColorLockPlugin extends Plugin
 	protected void startUp()
 	{
 		credChangeArmedAtMs = System.currentTimeMillis() + CRED_CHANGE_GRACE_MS;
+		migrateManualIncludeFoodConfig();
 		purgeDeprecatedConfigKeys();
 		overlayManager.add(itemOverlay);
 		lookupNavButton = NavigationButton.builder()
@@ -190,7 +213,14 @@ public class ColorLockPlugin extends Plugin
 		overlayManager.remove(itemOverlay);
 		if (lookupNavButton != null)
 		{
-			clientToolbar.removeNavigation(lookupNavButton);
+			try
+			{
+				clientToolbar.removeNavigation(lookupNavButton);
+			}
+			catch (RuntimeException ex)
+			{
+				log.debug("removeNavigation failed", ex);
+			}
 			lookupNavButton = null;
 		}
 		cancelPeriodicManifestRefresh();
@@ -209,6 +239,8 @@ public class ColorLockPlugin extends Plugin
 		settingsMuteTimer = new Timer(500, e -> {
 			boolean mute = groupSync.hubOverridesManualAssignedColor(config);
 			boolean panelOpen = applyAssignedColorRowMuteInConfigPanels(mute);
+			applyManualItemFilterRowsVisibility(!config.hubGroupSyncEnabled());
+			applyLegacyMemberCodeRowVisibility();
 			boolean wasOpen = settingsPanelOpenLastTick;
 			settingsPanelOpenLastTick = panelOpen;
 			if (panelOpen && !wasOpen)
@@ -260,11 +292,11 @@ public class ColorLockPlugin extends Plugin
 			{
 				if (!hubCredentialsFilled(config))
 				{
-					log.warn("Sync needs Group code and Member code. Checkbox turned off.");
+					log.warn("Sync needs Group access code. Checkbox turned off.");
 					SwingUtilities.invokeLater(() ->
 						configManager.setConfiguration(evt.getGroup(), key, Boolean.FALSE.toString()));
 					groupSync.clearHubSessionBlocking();
-					postChatBanner("Color Locked: enter Group code and Member code before enabling sync (Group password only if the group has one).");
+					postChatBanner("Color Locked: enter your Group access code (e.g. GeckoGlacier38#0723) before enabling sync.");
 					return;
 				}
 				pendingSyncToggle = Boolean.TRUE;
@@ -279,6 +311,16 @@ public class ColorLockPlugin extends Plugin
 					pendingSyncToggle = null;
 				});
 				postChatBanner("Color Locked: sync disabled. Manual color-lock is in effect.");
+				scheduleManifestRefetchForManualFilters();
+			}
+			return;
+		}
+		if (MANUAL_ITEM_FILTER_KEYS.contains(key))
+		{
+			if (!config.hubGroupSyncEnabled())
+			{
+				groupSync.clearItemsUrlOverride();
+				scheduleManifestRefetchForManualFilters();
 			}
 			return;
 		}
@@ -320,7 +362,7 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
-		if (!restrictUseMenuEntry(e))
+		if (!shouldStripMenuEntry(e))
 		{
 			return;
 		}
@@ -404,7 +446,7 @@ public class ColorLockPlugin extends Plugin
 		List<MenuEntry> remove = new ArrayList<>();
 		for (MenuEntry e : entries)
 		{
-			if (restrictUseMenuEntry(e))
+			if (shouldStripMenuEntry(e))
 			{
 				remove.add(e);
 			}
@@ -429,36 +471,28 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
-		if (!ColorLockMenuRules.isRestrictedUseVerb(event.getMenuOption()))
-		{
-			return;
-		}
-		int itemId = event.getItemId();
-		if (itemId <= 0)
-		{
-			MenuEntry me = event.getMenuEntry();
-			itemId = ColorLockItemIdResolver.resolve(me, client);
-		}
-		if (itemId <= 0)
-		{
-			itemId = event.getId();
-		}
-		if (itemId <= 0)
-		{
-			return;
-		}
-		if (manifestStore.isRestrictedForAssignment(itemId, assignment(), itemManager))
+		MenuEntry me = event.getMenuEntry();
+		if (shouldStripMenuEntry(me))
 		{
 			event.consume();
 		}
 	}
 
-	private boolean restrictUseMenuEntry(MenuEntry e)
+	private boolean shouldStripMenuEntry(MenuEntry e)
 	{
 		if (manifestStore.itemCount() == 0)
 		{
 			return false;
 		}
+		if (restrictInventoryUseMenuEntry(e))
+		{
+			return true;
+		}
+		return ColorLockSkillingGate.shouldStripGatherMenu(client, itemManager, manifestStore, assignment(), e);
+	}
+
+	private boolean restrictInventoryUseMenuEntry(MenuEntry e)
+	{
 		if (!ColorLockMenuRules.isRestrictedUseVerb(e.getOption()))
 		{
 			return false;
@@ -604,7 +638,27 @@ public class ColorLockPlugin extends Plugin
 				postChatBanner("Color Locked: hub changed your color to " + after.getKey()
 					+ " (was " + fromKey + ") for group " + slug + ".");
 			}
+			if (groupSync.consumeGroupItemPolicyDirty())
+			{
+				reloadManifestAfterHubItemPolicyChange();
+			}
 		});
+	}
+
+	/** Hub potion/food/ammo toggles changed on /state — refetch items with current Bearer policy. */
+	private void reloadManifestAfterHubItemPolicyChange()
+	{
+		if (!config.hubGroupSyncEnabled())
+		{
+			return;
+		}
+		final String prevUrl = manifestStore.lastLoadedManifestUrl();
+		final int prevSchema = manifestStore.manifestSchemaVersion();
+		manifestStore.downloadAsync(() -> {
+			validateSchemaQuietly();
+			postItemsMismatchBannerIfChanged(prevUrl, prevSchema);
+		});
+		postChatBanner("Color Locked: hub item rules changed — rules reloaded.");
 	}
 
 	private void sendPresenceOfflineBestEffort()
@@ -639,6 +693,16 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		manifestStore.downloadAsync(() -> validateSchemaQuietly());
+	}
+
+	/** After config is committed — manual filter toggles and sync-off need a fresh items URL. */
+	private void scheduleManifestRefetchForManualFilters()
+	{
+		if (GraphicsEnvironment.isHeadless())
+		{
+			return;
+		}
+		clientThread.invokeLater(this::kickoffFetch);
 	}
 
 	/** One shot: auth + state, then manifest, then mirror hub-assigned color into config. Runs only on checkbox-on. */
@@ -775,9 +839,22 @@ public class ColorLockPlugin extends Plugin
 		{
 			return "your group membership is not active (likely kicked). Manual color-lock is in effect.";
 		}
-		if (low.contains("publiccode required") || low.contains("slug or inviteurl"))
+		if (low.contains("invalid access code"))
+		{
+			return "invalid Group/Member code format. Use Group slug + Member code (#0000), or paste GroupSlug#0000 in Group code.";
+		}
+		if (low.contains("publiccode required") || low.contains("slug or inviteurl")
+			|| low.contains("accesscode or"))
 		{
 			return "missing required field on auth request: " + e;
+		}
+		if (httpStatus == 400 && !e.isEmpty())
+		{
+			return e;
+		}
+		if (httpStatus == 502 || httpStatus == 503)
+		{
+			return "hub temporarily unavailable (HTTP " + httpStatus + "). Item rules may be stale until retry succeeds.";
 		}
 		if (low.contains("storage") || low.contains("redis") || httpStatus == 503)
 		{
@@ -883,13 +960,42 @@ public class ColorLockPlugin extends Plugin
 
 	private static boolean hubCredentialsFilled(ColorLockConfig cfg)
 	{
-		if (cfg == null)
+		return ColorLockCredentials.from(cfg).isFilled();
+	}
+
+	private void applyManualItemFilterRowsVisibility(boolean show)
+	{
+		applyConfigRowVisibility(ColorLockConfig.MANUAL_LOCK_POTIONS_CONFIG_NAME, show);
+		applyConfigRowVisibility(ColorLockConfig.MANUAL_INCLUDE_FOOD_CONFIG_NAME, show);
+		applyConfigRowVisibility(ColorLockConfig.MANUAL_LOCK_AMMUNITION_CONFIG_NAME, show);
+	}
+
+	/** Hide legacy member row when a Slug#0000 access code is already in the group field. */
+	private void applyLegacyMemberCodeRowVisibility()
+	{
+		ColorLockCredentials cred = ColorLockCredentials.from(config);
+		applyConfigRowVisibility("Member code (legacy)", cred.accessCode == null);
+	}
+
+	private void applyConfigRowVisibility(String configRowTitle, boolean show)
+	{
+		for (Window w : Window.getWindows())
 		{
-			return false;
+			if (w == null || !w.isDisplayable() || !w.isShowing())
+			{
+				continue;
+			}
+			JLabel rowLabel = findJLabelMatchingText(w, configRowTitle);
+			if (rowLabel == null)
+			{
+				continue;
+			}
+			Container rowPanel = rowLabel.getParent();
+			if (rowPanel != null)
+			{
+				rowPanel.setVisible(show);
+			}
 		}
-		String slug = cfg.groupSlug() == null ? "" : cfg.groupSlug().trim();
-		String code = cfg.memberPublicCode() == null ? "" : cfg.memberPublicCode().trim();
-		return !slug.isEmpty() && !code.isEmpty();
 	}
 
 	/** @return {@code true} when the plugin's settings panel (the "Your color lock" row) is visible. */

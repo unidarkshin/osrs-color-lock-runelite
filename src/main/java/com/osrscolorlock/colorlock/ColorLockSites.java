@@ -2,7 +2,7 @@ package com.osrscolorlock.colorlock;
 
 import java.net.URI;
 
-/** Derive site origin from configured items manifest URL ({@code /data/items.json} or {@code /api/items}). */
+/** Derive site origin from items URL ({@code /api/v1/items}, {@code /api/items}, or {@code /data/items.json}). */
 final class ColorLockSites
 {
 	private ColorLockSites()
@@ -21,6 +21,11 @@ final class ColorLockSites
 			return "";
 		}
 		final String lower = trimmed.toLowerCase();
+		final int v1 = lower.indexOf("/api/v1/items");
+		if (v1 >= 0)
+		{
+			return trimTrailingSlash(trimmed.substring(0, v1));
+		}
 		final int api = lower.indexOf("/api/items");
 		if (api >= 0)
 		{

@@ -8,10 +8,10 @@ The plugin authenticates against the hub and reads its current color, group pale
 
 | Step | Endpoint | Purpose |
 |------|----------|---------|
-| 1 | `POST {base}/api/plugin/v1/auth` | Trade Group code + Member code + Group password for a Bearer JWT. |
+| 1 | `POST {base}/api/plugin/v1/auth` | Trade credentials for a Bearer JWT. Prefer `accessCode` (`GroupSlug#0042`); legacy `slug` / `inviteUrl` + `publicCode` still works. Optional `joinPasscode`. |
 | 2 | `GET  {base}/api/plugin/v1/state` | Pull current `group`, `member.assignedColor`, `member.status`, `items.url`, `items.schemaVersion`. |
 | 3 | `PATCH {base}/api/plugin/v1/me` | Heartbeat (~60 s). Sends `runescapeUsername` (required), `presence.online`, `currentColor`, and `sync.enabled` when the user toggles the plugin checkbox. |
-| ↳ | Items pull | `GET state.items.url` if provided, else `GET {base}/api/v1/items`, then `GET {base}/api/items` (deprecated OpenAPI alias) if the versioned GET fails. |
+| ↳ | Items pull | `GET state.items.url` if provided (`colored=1&groupFilters=1`; plugin strips pinned `includePotions` / `excludeFood` / `includeAmmunition` when synced so Bearer group policy applies), else built URL from config. **Sync off:** plugin settings **Lock potions/food/ammunition** → query params. **Sync on:** hub group toggles via Bearer only. Deprecated `GET {base}/api/items?…` last retry. |
 | ↳ | Auth 404 fallback | `POST {base}/api/plugin/v1/resolve/{slug}` — JWT-less; same member/group shapes as `/auth` when `/auth` returns `HTTP 404` but resolve is deployed. |
 
 `{base}` is derived from the hub origin (currently `https://group.thegrandchart.com`).
@@ -22,10 +22,11 @@ Request body (JSON):
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `publicCode` | yes | Member's public code from the hub. |
-| `slug` | one of `slug` / `inviteUrl` | Group code from `/g/<slug>`. |
-| `inviteUrl` | one of `slug` / `inviteUrl` | Plugin sends this when the user pastes the full hub URL into the Group code field. |
-| `joinPasscode` | yes (when group requires one) | Group password. |
+| `accessCode` | preferred | Combined `GroupSlug#0000` (e.g. `FoxMango42#0042`). Plugin sends this when both Group code and Member code are filled, or when the user pastes the combined code into Group code. |
+| `publicCode` | legacy | Member's public code (`#0042`) with `slug` or `inviteUrl`. |
+| `slug` | legacy | Group code from `/g/<slug>`. |
+| `inviteUrl` | legacy | Full hub invite URL in the Group code field. |
+| `joinPasscode` | when required | Group password. |
 
 Response:
 
@@ -56,7 +57,7 @@ The plugin stores the JWT in memory only, with the wall-clock expiry, and re-aut
   "group":  { "slug": "...", "name": "...", "enabledColors": [...] },
   "member": { "assignedColor": "red", "status": "active", "pluginProfileRev": 7, "colorLocked": false, ... },
   "roster": [ ... ],
-  "items":  { "url": "https://.../api/v1/items", "schemaVersion": 2, "note": "..." }
+  "items":  { "url": "https://.../api/v1/items?mode=color-lock&colored=1&groupFilters=1&...", "schemaVersion": 88, "note": "..." }
 }
 ```
 
@@ -85,11 +86,11 @@ Request body (everything except `runescapeUsername` is optional):
 | `sync.enabled` | optional | Sent exactly once per checkbox toggle so the hub history can timestamp the event and snapshot `currentColor`. Omitted on regular heartbeats. |
 | `stats` | optional | Not sent today; reserved for future skill/HP/prayer snapshots. |
 
-Hub considers members stale after ~180 s without a heartbeat, so a 60 s cadence keeps presence stable across short network hiccups. Response carries `X-OCL-API-Contract-Version: 2`.
+Hub considers members stale after ~180 s without a heartbeat, so a 60 s cadence keeps presence stable across short network hiccups. Response carries `X-OCL-API-Contract-Version: 8` (`ColorLockApiContracts.EXPECTED_PLUGIN_ME_API_CONTRACT_VERSION`).
 
 ## Items manifest
 
-HTTP `GET` → **JSON array** of objects. Response headers `X-OCL-API-Contract-Version: 1` and `X-OCL-Items-Schema-Version: 2` mirror the in-payload `schemaVersion`. Each object has (minimum for this plugin):
+HTTP `GET` → **JSON array** of objects. Response headers `X-OCL-API-Contract-Version: 10` and `X-OCL-Items-Schema-Version: 88` (see `ColorLockApiContracts`). Default query (hub `state.items.url` and plugin fallback): `mode=color-lock`, `colored=1`, `groupFilters=1`; when sync is on, omit pinned `includePotions` / `excludeFood` / `includeAmmunition` so Bearer group policy applies. Optional query params the plugin does **not** send today: `category`, `slot`, `usableBy` (hub/UI filters). Each object has (minimum for this plugin):
 
 | Field | Type | Notes |
 |-------|------|--------|
@@ -101,7 +102,7 @@ HTTP `GET` → **JSON array** of objects. Response headers `X-OCL-API-Contract-V
 | `red` … `white` | number | Percentages; informational |
 | **`usableColors`** | string[] | One or more of: `red`, `yellow`, `green`, `blue`, `purple`, `brown`, `black`, `white` |
 | **`colorLockApplies`** | bool | **`false`** = do not gate. **`true`** = gate (when `usableColors` present). |
-| **`schemaVersion`** | int | Current value: **2** — increment together with plugin |
+| **`schemaVersion`** | int | Current value: **88** — increment together with plugin (`ColorLockPlugin.EXPECTED_SCHEMA_VERSION`) |
 
 Other fields (`stabAttack`, `tierLabel`, …) may be ignored.
 
