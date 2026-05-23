@@ -62,6 +62,10 @@ public class ColorLockLookupPanel extends PluginPanel
 	/** Before the panel is in the hierarchy, use a fraction of the screen as a height hint. */
 	private static final int MIN_LOOKUP_PANEL_HEIGHT = 480;
 
+	private static final Set<String> LOOKUP_ACTIONABLE_CATEGORIES = Set.of(
+		"weapon", "armour", "food", "potion", "ammo"
+	);
+
 	private static boolean parseStoredToggle(ConfigManager cm, String key, boolean defaultValue)
 	{
 		String raw = cm.getConfiguration("colorlockhelper", key);
@@ -672,7 +676,11 @@ public class ColorLockLookupPanel extends PluginPanel
 		{
 			return !enforced;
 		}
-		return row.getColorLockApplies() != null || Boolean.TRUE.equals(row.getColorLockExcluded());
+		if (Boolean.TRUE.equals(row.getColorLockExcluded()))
+		{
+			return true;
+		}
+		return enforced && LOOKUP_ACTIONABLE_CATEGORIES.contains(row.getCategory().toLowerCase(Locale.ENGLISH));
 	}
 
 	private void populateResults(List<LookupHit> hits, boolean truncated)
