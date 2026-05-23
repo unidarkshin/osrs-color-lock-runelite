@@ -22,6 +22,7 @@ final class ColorLockMenuRules
 			case "equip":
 			case "wield":
 			case "wear":
+			case "release":
 				return true;
 			default:
 				return false;

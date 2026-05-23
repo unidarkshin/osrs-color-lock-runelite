@@ -51,7 +51,7 @@ import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 @PluginDescriptor(
 	name = "Color Locked",
-	description = "Group Iron color-lock enforcement. Blocks Eat/Drink/Equip/Wield/Wear on items restricted by your "
+	description = "Group Iron color-lock enforcement. Blocks Eat/Drink/Equip/Wield/Wear/Release on items restricted by your "
 		+ "assigned color. Strips Mine/Chop when carrying a restricted pickaxe or axe. Marks restricted items with a red "
 		+ "overlay in inventory, bank, and worn equipment. Includes a sidebar for looking up which items your color can "
 		+ "use. Syncs your assigned color and item rules from a hub group, or runs standalone with manual settings.",
