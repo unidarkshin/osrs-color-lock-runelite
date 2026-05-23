@@ -663,24 +663,26 @@ public class ColorLockLookupPanel extends PluginPanel
 	private boolean passesLookupFilters(ManifestItem row, int itemId, boolean paletteFilteredByHub)
 	{
 		boolean enforced = ManifestRules.isLockEnforced(row);
+		boolean actionable = Boolean.TRUE.equals(row.getColorLockExcluded())
+			|| LOOKUP_ACTIONABLE_CATEGORIES.contains(row.getCategory().toLowerCase(Locale.ENGLISH));
 		if (myPaletteOnlyCheckbox.isSelected() && !paletteFilteredByHub)
 		{
-			if (!enforced)
+			if (!enforced || !actionable)
 			{
 				return false;
 			}
 			ColorLockColor lock = groupSync.effectiveAssignment(config);
 			return !manifestStore.isRestrictedForAssignment(itemId, lock, itemManager);
 		}
+		if (myPaletteOnlyCheckbox.isSelected() && paletteFilteredByHub)
+		{
+			return actionable;
+		}
 		if (allColorsListingsCheckbox.isSelected())
 		{
 			return !enforced;
 		}
-		if (Boolean.TRUE.equals(row.getColorLockExcluded()))
-		{
-			return true;
-		}
-		return enforced && LOOKUP_ACTIONABLE_CATEGORIES.contains(row.getCategory().toLowerCase(Locale.ENGLISH));
+		return actionable && enforced;
 	}
 
 	private void populateResults(List<LookupHit> hits, boolean truncated)
