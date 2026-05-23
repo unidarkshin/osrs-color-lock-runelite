@@ -1,5 +1,6 @@
 package com.osrscolorlock.colorlock;
 
+import com.google.gson.Gson;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.game.ItemManager;
 
@@ -27,6 +28,7 @@ public class ManifestStore
 	private static final Logger log = LoggerFactory.getLogger(ManifestStore.class);
 	private static final int MANIFEST_HTTP_RETRIES = 3;
 
+	private final Gson gson;
 	private final ClientThread clientThread;
 	private final ColorLockGroupSync groupSync;
 	private final ColorLockConfig config;
@@ -43,9 +45,10 @@ public class ManifestStore
 	private volatile long lastManifestPayloadCrc = Long.MIN_VALUE;
 
 	@Inject
-	public ManifestStore(ClientThread clientThread, ColorLockGroupSync groupSync, ColorLockConfig config,
+	public ManifestStore(Gson gson, ClientThread clientThread, ColorLockGroupSync groupSync, ColorLockConfig config,
 		ScheduledExecutorService executor)
 	{
+		this.gson = gson;
 		this.clientThread = clientThread;
 		this.groupSync = groupSync;
 		this.config = config;
@@ -326,7 +329,7 @@ public class ManifestStore
 	List<ManifestItem> fetchItemsListBlocking(String url) throws IOException
 	{
 		byte[] raw = downloadItemsPayload(url);
-		return ManifestJson.readItemsUtf8(raw);
+		return ManifestJson.readItemsUtf8(gson, raw);
 	}
 
 	void loadBlocking(String url) throws IOException
@@ -401,7 +404,7 @@ public class ManifestStore
 	private void applyLoadedManifest(String url, byte[] raw, int headerSchema) throws IOException
 	{
 		long crcVal = crc32(raw);
-		List<ManifestItem> list = ManifestJson.readItemsUtf8(raw);
+		List<ManifestItem> list = ManifestJson.readItemsUtf8(gson, raw);
 
 		HashMap<Integer, ManifestItem> next = new HashMap<>(Math.max(list.size() * 2, 64));
 		int duplicateIds = 0;

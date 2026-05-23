@@ -41,7 +41,6 @@ import org.slf4j.LoggerFactory;
 @Singleton
 public class ColorLockGroupSync
 {
-	private static final Gson GSON = new Gson();
 	private static final Logger log = LoggerFactory.getLogger(ColorLockGroupSync.class);
 
 	private static final int CONNECT_MS = 20_000;
@@ -81,9 +80,12 @@ public class ColorLockGroupSync
 	private volatile int lastGroupItemPolicyFingerprint = -1;
 	private volatile boolean groupItemPolicyDirty;
 
+	private final Gson gson;
+
 	@Inject
-	public ColorLockGroupSync(ClientThread clientThread, ScheduledExecutorService executor)
+	public ColorLockGroupSync(Gson gson, ClientThread clientThread, ScheduledExecutorService executor)
 	{
+		this.gson = gson;
 		this.clientThread = clientThread;
 		this.executor = executor;
 	}
@@ -462,7 +464,7 @@ public class ColorLockGroupSync
 			try (BufferedReader reader = new BufferedReader(
 				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
 			{
-				PluginAuthResp auth = GSON.fromJson(reader, PluginAuthResp.class);
+				PluginAuthResp auth = gson.fromJson(reader, PluginAuthResp.class);
 				if (auth == null || auth.accessToken == null || auth.accessToken.isEmpty() || auth.member == null)
 				{
 					clearJwt();
@@ -760,7 +762,7 @@ public class ColorLockGroupSync
 			try (BufferedReader reader = new BufferedReader(
 				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
 			{
-				PluginStateResp state = GSON.fromJson(reader, PluginStateResp.class);
+				PluginStateResp state = gson.fromJson(reader, PluginStateResp.class);
 				if (state == null || state.member == null)
 				{
 					return rc;
@@ -988,7 +990,7 @@ public class ColorLockGroupSync
 			try (BufferedReader reader = new BufferedReader(
 				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
 			{
-				StatelessResolveResponse resp = GSON.fromJson(reader, StatelessResolveResponse.class);
+				StatelessResolveResponse resp = gson.fromJson(reader, StatelessResolveResponse.class);
 				applyGroupAndMember(resp != null ? resp.group : null, resp != null ? resp.member : null, null);
 			}
 			return true;
@@ -1047,7 +1049,9 @@ public class ColorLockGroupSync
 			}
 			try
 			{
-				com.google.gson.JsonObject obj = GSON.fromJson(body, com.google.gson.JsonObject.class);
+				@SuppressWarnings("deprecation")
+				com.google.gson.JsonElement parsed = new com.google.gson.JsonParser().parse(body);
+				com.google.gson.JsonObject obj = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
 				if (obj != null && obj.has("error") && obj.get("error").isJsonPrimitive())
 				{
 					String e = obj.get("error").getAsString();

@@ -17,27 +17,23 @@ import java.util.Map;
 
 final class ManifestJson
 {
-	private static final Gson GSON = new Gson();
 	private static final Type LIST_TYPE = TypeToken.getParameterized(List.class, ManifestItem.class).getType();
 
 	private ManifestJson()
 	{
 	}
 
-	/**
-	 * Accepts raw JSON body: either a JSON array or an object wrapping the array ({@code items}, {@code data}).
-	 */
-	@SuppressWarnings("deprecation")
-	static List<ManifestItem> readItemsUtf8(byte[] utf8Body) throws IOException
+	static List<ManifestItem> readItemsUtf8(Gson gson, byte[] utf8Body) throws IOException
 	{
 		String json = new String(utf8Body, java.nio.charset.StandardCharsets.UTF_8);
+		@SuppressWarnings("deprecation")
 		JsonElement root = new JsonParser().parse(json);
-		return readItemsJson(root);
+		return readItemsJson(gson, root);
 	}
 
-	static List<ManifestItem> readItems(Reader reader) throws IOException
+	static List<ManifestItem> readItems(Gson gson, Reader reader) throws IOException
 	{
-		List<ManifestItem> list = GSON.fromJson(reader, LIST_TYPE);
+		List<ManifestItem> list = gson.fromJson(reader, LIST_TYPE);
 		if (list == null || list.isEmpty())
 		{
 			throw new IOException("manifest empty");
@@ -45,7 +41,7 @@ final class ManifestJson
 		return list;
 	}
 
-	private static List<ManifestItem> readItemsJson(JsonElement root) throws IOException
+	private static List<ManifestItem> readItemsJson(Gson gson, JsonElement root) throws IOException
 	{
 		JsonElement arrayEl = unwrapToArray(root);
 		if (!arrayEl.isJsonArray())
@@ -53,7 +49,7 @@ final class ManifestJson
 			throw new IOException("manifest payload must be a JSON array or an object wrapping an array");
 		}
 		JsonArray arr = arrayEl.getAsJsonArray();
-		List<ManifestItem> list = GSON.fromJson(arr, LIST_TYPE);
+		List<ManifestItem> list = gson.fromJson(arr, LIST_TYPE);
 		if (list == null || list.isEmpty())
 		{
 			throw new IOException("manifest empty");
