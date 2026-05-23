@@ -293,11 +293,11 @@ public class ColorLockPlugin extends Plugin
 			{
 				if (!hubCredentialsFilled(config))
 				{
-					log.warn("Sync needs Group access code. Checkbox turned off.");
+					log.warn("Sync needs Group auth code. Checkbox turned off.");
 					SwingUtilities.invokeLater(() ->
 						configManager.setConfiguration(evt.getGroup(), key, Boolean.FALSE.toString()));
 					groupSync.clearHubSessionBlocking();
-					postChatBanner("Color Locked: enter your Group access code (e.g. GeckoGlacier38#0723) before enabling sync.");
+					postChatBanner("Color Locked: enter your Group auth code (e.g. GeckoGlacier38#0723) before enabling sync.");
 					return;
 				}
 				pendingSyncToggle = Boolean.TRUE;

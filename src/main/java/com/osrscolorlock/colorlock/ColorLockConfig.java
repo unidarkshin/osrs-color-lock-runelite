@@ -15,14 +15,14 @@ public interface ColorLockConfig extends Config
 	String MANUAL_LOCK_AMMUNITION_CONFIG_NAME = "Include ammunition in item list";
 
 	/** Config row label — used to find this row in RL settings UI. */
-	String GROUP_ACCESS_CODE_CONFIG_NAME = "Group access code";
+	String GROUP_ACCESS_CODE_CONFIG_NAME = "Group auth code";
 
 	@ConfigItem(
 		position = 10,
 		keyName = "groupSlug",
 		name = GROUP_ACCESS_CODE_CONFIG_NAME,
-		description = "Hub access code (e.g. GeckoGlacier38#0723) or group slug / invite URL. "
-			+ "With Sync on, only the access code is required."
+		description = "Hub auth code (e.g. GeckoGlacier38#0723) or group slug / invite URL. "
+			+ "With Sync on, only the auth code is required."
 	)
 	default String groupSlug()
 	{
@@ -45,7 +45,7 @@ public interface ColorLockConfig extends Config
 		keyName = "memberPublicCode",
 		name = "Member code (legacy)",
 		description = "Optional. Only for old groups that still use a word member code (e.g. Frog12) with a separate group slug. "
-			+ "Leave blank when using Group access code (Slug#0000)."
+			+ "Leave blank when using Group auth code (Slug#0000)."
 	)
 	default String memberPublicCode()
 	{
@@ -56,7 +56,7 @@ public interface ColorLockConfig extends Config
 		position = 13,
 		keyName = "hubGroupSyncEnabled",
 		name = "Sync with group",
-		description = "Authenticate with your Group access code (Slug#0000; Group password only if the group has one), "
+		description = "Authenticate with your Group auth code (Slug#0000; Group password only if the group has one), "
 			+ "pull your assigned color, and reload item rules from the hub. While enabled, potion/food/ammo filters come from "
 			+ "the hub — not the manual toggles below. Changing credentials disables sync until you re-check this box."
 	)
