@@ -34,6 +34,7 @@ import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.ChatMessageType;
+import net.runelite.api.Skill;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatColorType;
 import net.runelite.client.chat.ChatMessageBuilder;
@@ -577,7 +578,8 @@ public class ColorLockPlugin extends Plugin
 			String currentColorKey = currentEffectiveColorKey();
 			Boolean toggle = pendingSyncToggle;
 			pendingSyncToggle = null;
-			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle,
+			java.util.Map<String, Integer> stats = gatherStats();
+			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle, stats,
 				this::pullStateAndMirrorColorOnHeartbeat);
 		});
 	}
@@ -608,13 +610,33 @@ public class ColorLockPlugin extends Plugin
 			done.run();
 			return;
 		}
-		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, done);
+		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, null, done);
 	}
 
 	private String currentEffectiveColorKey()
 	{
 		ColorLockColor c = groupSync.effectiveAssignment(config);
 		return c == null ? null : c.getKey();
+	}
+
+	private java.util.Map<String, Integer> gatherStats()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return null;
+		}
+		java.util.Map<String, Integer> stats = new java.util.LinkedHashMap<>();
+		for (Skill skill : Skill.values())
+		{
+			if (skill == Skill.OVERALL)
+			{
+				continue;
+			}
+			stats.put(skill.getName().toLowerCase(java.util.Locale.ENGLISH), client.getRealSkillLevel(skill));
+		}
+		stats.put("hitpoints_current", client.getBoostedSkillLevel(Skill.HITPOINTS));
+		stats.put("prayer_current", client.getBoostedSkillLevel(Skill.PRAYER));
+		return stats;
 	}
 
 	/**

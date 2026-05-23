@@ -187,7 +187,6 @@ public class ManifestStore
 			}
 			catch (InterruptedException e)
 			{
-				Thread.currentThread().interrupt();
 				return false;
 			}
 		}

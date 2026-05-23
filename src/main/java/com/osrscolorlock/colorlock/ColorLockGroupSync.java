@@ -26,10 +26,13 @@ import java.util.Set;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
+import java.util.Map;
+
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,11 +84,13 @@ public class ColorLockGroupSync
 	private volatile boolean groupItemPolicyDirty;
 
 	private final Gson gson;
+	private final OkHttpClient httpClient;
 
 	@Inject
-	public ColorLockGroupSync(Gson gson, ClientThread clientThread, ScheduledExecutorService executor)
+	public ColorLockGroupSync(Gson gson, OkHttpClient httpClient, ClientThread clientThread, ScheduledExecutorService executor)
 	{
 		this.gson = gson;
+		this.httpClient = httpClient;
 		this.clientThread = clientThread;
 		this.executor = executor;
 	}
@@ -493,32 +498,22 @@ public class ColorLockGroupSync
 		}
 	}
 
-	/**
-	 * Heartbeat / sync-toggle relay; optional completion on the client thread.
-	 *
-	 * @see #patchMeAsync(ColorLockConfig, String, boolean, String, Boolean, Runnable)
-	 */
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Runnable onFinishClientThread)
 	{
-		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, onFinishClientThread);
+		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, null, onFinishClientThread);
 	}
 
-	/**
-	 * Best-effort heartbeat: PATCH /api/plugin/v1/me with {@code runescapeUsername} (required),
-	 * {@code presence.online}, and {@code currentColor} (effective plugin color, lowercase key).
-	 * Pass {@code syncToggleEnabled} non-null to report a plugin sync toggle event ({@code sync.enabled}).
-	 * Skips silently when JWT missing/expired or {@code runescapeName} is empty.
-	 */
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
-		String currentColorKey, Boolean syncToggleEnabled, Runnable onFinishClientThread)
+		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats,
+		Runnable onFinishClientThread)
 	{
 		executor.execute(() -> {
 			try
 			{
 				synchronized (sessionLock)
 				{
-					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled);
+					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled, stats);
 				}
 			}
 			finally
@@ -552,7 +547,7 @@ public class ColorLockGroupSync
 	}
 
 	private int patchMeBlocking(ColorLockConfig config, String runescapeName, boolean presenceOnline,
-		String currentColorKey, Boolean syncToggleEnabled)
+		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats)
 	{
 		boolean isSyncToggleEvent = syncToggleEnabled != null;
 		if (config == null)
@@ -560,9 +555,6 @@ public class ColorLockGroupSync
 			log.debug("Heartbeat skipped: config not initialised.");
 			return -1;
 		}
-		// Regular heartbeats stop firing as soon as the user unchecks. The one-shot
-		// sync.enabled=false PATCH must still go out so the hub records the toggle and clears
-		// our "Online" flag, so we only short-circuit when there's no explicit toggle event.
 		if (!config.hubGroupSyncEnabled() && !isSyncToggleEvent)
 		{
 			log.debug("Heartbeat skipped: hub sync disabled.");
@@ -592,7 +584,7 @@ public class ColorLockGroupSync
 			return -1;
 		}
 		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_ME);
-		StringBuilder bodySb = new StringBuilder(160)
+		StringBuilder bodySb = new StringBuilder(256)
 			.append("{\"runescapeUsername\":\"").append(ColorLockAuthBodies.gsonEscape(clean))
 			.append("\",\"presence\":{\"online\":").append(presenceOnline).append("}");
 		if (currentColorKey != null && !currentColorKey.isBlank())
@@ -604,33 +596,58 @@ public class ColorLockGroupSync
 		{
 			bodySb.append(",\"sync\":{\"enabled\":").append(syncToggleEnabled.booleanValue()).append("}");
 		}
+		if (stats != null && !stats.isEmpty())
+		{
+			bodySb.append(",\"stats\":{\"skills\":{");
+			boolean first = true;
+			for (Map.Entry<String, Integer> e : stats.entrySet())
+			{
+				String key = e.getKey();
+				if ("hitpoints_current".equals(key) || "prayer_current".equals(key))
+				{
+					continue;
+				}
+				if (!first)
+				{
+					bodySb.append(',');
+				}
+				bodySb.append('"').append(key).append("\":").append(e.getValue());
+				first = false;
+			}
+			bodySb.append('}');
+			Integer hp = stats.get("hitpoints_current");
+			Integer pray = stats.get("prayer_current");
+			if (hp != null)
+			{
+				bodySb.append(",\"hitpoints\":").append(hp);
+			}
+			if (pray != null)
+			{
+				bodySb.append(",\"prayer\":").append(pray);
+			}
+			bodySb.append('}');
+		}
 		bodySb.append("}");
 		String body = bodySb.toString();
 
-		// JDK HttpURLConnection rejects PATCH (ProtocolException). Use java.net.http.HttpClient instead.
-		HttpClient client = HttpClient.newBuilder()
-			.connectTimeout(Duration.ofMillis(CONNECT_MS))
-			.build();
-		HttpRequest req = HttpRequest.newBuilder()
-			.uri(URI.create(uri))
-			.timeout(Duration.ofMillis(READ_MS))
-			.header("Content-Type", "application/json; charset=utf-8")
+		Request req = new Request.Builder()
+			.url(uri)
+			.patch(RequestBody.create(MediaType.get("application/json; charset=utf-8"), body))
 			.header("Accept", "application/json")
 			.header("Authorization", "Bearer " + accessJwt)
-			.header("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)")
-			.method("PATCH", HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+			.header("User-Agent", "osrs-color-lock-runelite/1.0")
 			.build();
-		try
+		try (Response resp = httpClient.newCall(req).execute())
 		{
-			HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-			int rc = resp.statusCode();
+			int rc = resp.code();
 			if (rc == HttpURLConnection.HTTP_UNAUTHORIZED)
 			{
 				clearJwt();
 			}
 			if (rc != HttpURLConnection.HTTP_OK && rc != HttpURLConnection.HTTP_NO_CONTENT)
 			{
-				log.warn("plugin/v1/me PATCH HTTP {} for {} body={}", rc, clean, truncateForLog(resp.body()));
+				String respBody = resp.body() != null ? resp.body().string() : "";
+				log.warn("plugin/v1/me PATCH HTTP {} for {} body={}", rc, clean, truncateForLog(respBody));
 			}
 			else
 			{
@@ -639,12 +656,8 @@ public class ColorLockGroupSync
 			}
 			return rc;
 		}
-		catch (IOException | InterruptedException e)
+		catch (IOException e)
 		{
-			if (e instanceof InterruptedException)
-			{
-				Thread.currentThread().interrupt();
-			}
 			log.warn("plugin/v1/me PATCH failed", e);
 			return -1;
 		}
