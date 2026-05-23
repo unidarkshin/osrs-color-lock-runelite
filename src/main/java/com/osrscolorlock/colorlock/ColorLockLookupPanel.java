@@ -121,10 +121,13 @@ public class ColorLockLookupPanel extends PluginPanel
 		resultsPanel.setLayout(new BoxLayout(resultsPanel, BoxLayout.Y_AXIS));
 		resultsPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
+		JPanel resultsWrapper = new JPanel(new BorderLayout());
+		resultsWrapper.add(resultsPanel, BorderLayout.NORTH);
+
 		JPanel itemsTab = new JPanel(new BorderLayout());
 
 		JScrollPane scroll = new JScrollPane(
-			resultsPanel,
+			resultsWrapper,
 			ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
 			ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 		scroll.getVerticalScrollBar().setUnitIncrement(16);
