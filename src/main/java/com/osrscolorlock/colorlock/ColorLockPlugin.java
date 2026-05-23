@@ -889,27 +889,21 @@ public class ColorLockPlugin extends Plugin
 			postChatBanner("Color Locked: item list reload failed (" + err + ").");
 			return;
 		}
-		String curUrl = manifestStore.lastLoadedManifestUrl();
 		int curSchema = manifestStore.manifestSchemaVersion();
 		StringBuilder parts = new StringBuilder();
-		if (prevUrl != null && curUrl != null && !prevUrl.equals(curUrl))
-		{
-			parts.append("source moved to ").append(curUrl);
-		}
 		if (prevSchema > 0 && curSchema > 0 && prevSchema != curSchema)
 		{
-			if (parts.length() > 0) parts.append("; ");
-			parts.append("schemaVersion ").append(prevSchema).append(" -> ").append(curSchema);
+			parts.append("schema ").append(prevSchema).append(" -> ").append(curSchema);
 		}
 		if (curSchema > 0 && curSchema != EXPECTED_SCHEMA_VERSION)
 		{
 			if (parts.length() > 0) parts.append("; ");
-			parts.append("plugin expects schema ").append(EXPECTED_SCHEMA_VERSION)
-				.append(" but hub returned ").append(curSchema);
+			parts.append("plugin update may be needed (schema ").append(curSchema)
+				.append(" vs expected ").append(EXPECTED_SCHEMA_VERSION).append(")");
 		}
 		if (parts.length() > 0)
 		{
-			postChatBanner("Color Locked: items mismatch (" + parts + "). Rules reloaded from hub.");
+			postChatBanner("Color Locked: items updated (" + parts + ").");
 		}
 	}
 

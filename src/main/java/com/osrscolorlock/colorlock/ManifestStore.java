@@ -171,6 +171,10 @@ public class ManifestStore
 			}
 			if (!isRetryableManifestError(loadError) || attempt >= MANIFEST_HTTP_RETRIES)
 			{
+				if (isRetryableManifestError(loadError))
+				{
+					log.warn("color-lock manifest fetch failed after {} retries: {}", MANIFEST_HTTP_RETRIES, loadError);
+				}
 				return false;
 			}
 			log.debug("color-lock manifest retry {}/{} for {}", attempt + 1, MANIFEST_HTTP_RETRIES, url);
@@ -263,7 +267,14 @@ public class ManifestStore
 		catch (IOException e)
 		{
 			loadError = e.getMessage();
-			log.warn("color-lock potion supplement fetch failed at {}", url, e);
+			if (isRetryableManifestError(loadError))
+			{
+				log.debug("color-lock potion supplement fetch failed (retryable): {}", e.getMessage());
+			}
+			else
+			{
+				log.warn("color-lock potion supplement fetch failed at {}", url, e);
+			}
 		}
 	}
 
@@ -278,7 +289,14 @@ public class ManifestStore
 		catch (IOException e)
 		{
 			loadError = e.getMessage();
-			log.warn("color-lock manifest fetch failed at {}", url, e);
+			if (isRetryableManifestError(loadError))
+			{
+				log.debug("color-lock manifest fetch failed (retryable): {}", e.getMessage());
+			}
+			else
+			{
+				log.warn("color-lock manifest fetch failed at {}", url, e);
+			}
 			return false;
 		}
 	}
