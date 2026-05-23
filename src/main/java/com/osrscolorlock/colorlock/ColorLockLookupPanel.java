@@ -672,7 +672,7 @@ public class ColorLockLookupPanel extends PluginPanel
 		{
 			return !enforced;
 		}
-		return true;
+		return row.getColorLockApplies() != null || Boolean.TRUE.equals(row.getColorLockExcluded());
 	}
 
 	private void populateResults(List<LookupHit> hits, boolean truncated)
