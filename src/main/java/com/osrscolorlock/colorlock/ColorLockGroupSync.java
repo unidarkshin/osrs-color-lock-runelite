@@ -10,10 +10,7 @@ import java.util.concurrent.ScheduledExecutorService;
 
 import net.runelite.client.callback.ClientThread;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -23,10 +20,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -90,7 +87,10 @@ public class ColorLockGroupSync
 	public ColorLockGroupSync(Gson gson, OkHttpClient httpClient, ClientThread clientThread, ScheduledExecutorService executor)
 	{
 		this.gson = gson;
-		this.httpClient = httpClient;
+		this.httpClient = httpClient.newBuilder()
+			.connectTimeout(CONNECT_MS, TimeUnit.MILLISECONDS)
+			.readTimeout(READ_MS, TimeUnit.MILLISECONDS)
+			.build();
 		this.clientThread = clientThread;
 		this.executor = executor;
 	}
@@ -366,7 +366,7 @@ public class ColorLockGroupSync
 			return;
 		}
 		int sc = fetchPluginStateAndApplyBlocking(base);
-		if (sc == HttpURLConnection.HTTP_UNAUTHORIZED)
+		if (sc == 401)
 		{
 			clearJwt();
 			syncFullSessionBlocking(config);
@@ -398,7 +398,7 @@ public class ColorLockGroupSync
 
 		int authRc = postPluginAuthBlocking(base, cred.groupField, cred.memberField, jp);
 		lastAuthHttpStatus = authRc;
-		if (authRc == HttpURLConnection.HTTP_NOT_FOUND)
+		if (authRc == 404)
 		{
 			if (postPluginResolveV1Blocking(base, cred.pathSlug, cred.memberField, jp))
 			{
@@ -408,7 +408,7 @@ public class ColorLockGroupSync
 			log.warn("plugin/v1/auth 404 and plugin/v1/resolve failed for slug {}", cred.pathSlug);
 			return;
 		}
-		if (authRc != HttpURLConnection.HTTP_OK || accessJwt == null || accessJwt.isEmpty())
+		if (authRc != 200 || accessJwt == null || accessJwt.isEmpty())
 		{
 			clearSession();
 			if (authRc > 0)
@@ -423,12 +423,12 @@ public class ColorLockGroupSync
 		{
 			int stateRc = fetchPluginStateAndApplyBlocking(base);
 			lastStateHttpStatus = stateRc;
-			if (stateRc == HttpURLConnection.HTTP_UNAUTHORIZED && !retriedJwt)
+			if (stateRc == 401 && !retriedJwt)
 			{
 				clearJwt();
 				authRc = postPluginAuthBlocking(base, cred.groupField, cred.memberField, jp);
 				lastAuthHttpStatus = authRc;
-				if (authRc != HttpURLConnection.HTTP_OK || jwtMissingOrExpired())
+				if (authRc != 200 || jwtMissingOrExpired())
 				{
 					clearSession();
 					log.warn("plugin/v1/state 401 -> re-auth failed for slug {}", cred.pathSlug);
@@ -437,7 +437,7 @@ public class ColorLockGroupSync
 				retriedJwt = true;
 				continue;
 			}
-			if (stateRc != HttpURLConnection.HTTP_OK)
+			if (stateRc != 200)
 			{
 				log.warn("plugin/v1/state HTTP {} - using auth snapshot only", stateRc);
 			}
@@ -448,53 +448,43 @@ public class ColorLockGroupSync
 	private int postPluginAuthBlocking(String base, String slug, String publicCode, String joinPasscode)
 	{
 		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_AUTH);
-		HttpURLConnection conn = null;
-		try
+		String bodyJson = ColorLockAuthBodies.buildPluginAuthJson(slug, publicCode, joinPasscode);
+		Request request = new Request.Builder()
+			.url(uri)
+			.post(RequestBody.create(MediaType.get("application/json; charset=utf-8"), bodyJson))
+			.header("Accept", "application/json")
+			.header("Cache-Control", "no-cache")
+			.header("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)")
+			.build();
+		try (Response response = httpClient.newCall(request).execute())
 		{
-			conn = openJsonPost(uri);
-			String bodyJson = ColorLockAuthBodies.buildPluginAuthJson(slug, publicCode, joinPasscode);
-			try (OutputStreamWriter w = new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8))
+			int rc = response.code();
+			if (rc != 200)
 			{
-				w.write(bodyJson);
-			}
-
-			int rc = conn.getResponseCode();
-			if (rc != HttpURLConnection.HTTP_OK)
-			{
-				lastAuthErrorMessage = readErrorMessageQuietly(conn);
+				lastAuthErrorMessage = readErrorMessageQuietly(response);
 				return rc;
 			}
 			lastAuthErrorMessage = null;
 
-			try (BufferedReader reader = new BufferedReader(
-				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
+			String respBody = response.body().string();
+			PluginAuthResp auth = gson.fromJson(respBody, PluginAuthResp.class);
+			if (auth == null || auth.accessToken == null || auth.accessToken.isEmpty() || auth.member == null)
 			{
-				PluginAuthResp auth = gson.fromJson(reader, PluginAuthResp.class);
-				if (auth == null || auth.accessToken == null || auth.accessToken.isEmpty() || auth.member == null)
-				{
-					clearJwt();
-					return -1;
-				}
-				accessJwt = auth.accessToken;
-				int expWall = auth.expiresInSec == null || auth.expiresInSec <= 0 ? 7200 : auth.expiresInSec;
-				long slackSec = expWall > 120 ? expWall - 60L : Math.max(expWall / 2L, 60L);
-				accessJwtExpiryWallMs = System.currentTimeMillis() + slackSec * 1000L;
-				applyGroupAndMember(auth.group, auth.member, null);
+				clearJwt();
+				return -1;
 			}
-			return HttpURLConnection.HTTP_OK;
+			accessJwt = auth.accessToken;
+			int expWall = auth.expiresInSec == null || auth.expiresInSec <= 0 ? 7200 : auth.expiresInSec;
+			long slackSec = expWall > 120 ? expWall - 60L : Math.max(expWall / 2L, 60L);
+			accessJwtExpiryWallMs = System.currentTimeMillis() + slackSec * 1000L;
+			applyGroupAndMember(auth.group, auth.member, null);
+			return 200;
 		}
 		catch (IOException e)
 		{
 			clearJwt();
 			log.warn("plugin/v1/auth failed", e);
 			return -1;
-		}
-		finally
-		{
-			if (conn != null)
-			{
-				conn.disconnect();
-			}
 		}
 	}
 
@@ -563,7 +553,7 @@ public class ColorLockGroupSync
 		if (jwtMissingOrExpired())
 		{
 			log.debug("Heartbeat skipped: JWT missing or expired (sync first).");
-			return HttpURLConnection.HTTP_UNAUTHORIZED;
+			return 401;
 		}
 		String clean = normalizeRunescapeName(runescapeName);
 		if (clean.isEmpty())
@@ -640,11 +630,11 @@ public class ColorLockGroupSync
 		try (Response resp = httpClient.newCall(req).execute())
 		{
 			int rc = resp.code();
-			if (rc == HttpURLConnection.HTTP_UNAUTHORIZED)
+			if (rc == 401)
 			{
 				clearJwt();
 			}
-			if (rc != HttpURLConnection.HTTP_OK && rc != HttpURLConnection.HTTP_NO_CONTENT)
+			if (rc != 200 && rc != 204)
 			{
 				String respBody = resp.body() != null ? resp.body().string() : "";
 				log.warn("plugin/v1/me PATCH HTTP {} for {} body={}", rc, clean, truncateForLog(respBody));
@@ -748,57 +738,41 @@ public class ColorLockGroupSync
 	{
 		if (jwtMissingOrExpired())
 		{
-			return HttpURLConnection.HTTP_UNAUTHORIZED;
+			return 401;
 		}
 		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_STATE);
-		HttpURLConnection conn = null;
-		try
+		Request request = new Request.Builder()
+			.url(uri)
+			.header("Authorization", "Bearer " + accessJwt)
+			.header("Accept", "application/json")
+			.header("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)")
+			.header("Cache-Control", "no-cache")
+			.build();
+		try (Response response = httpClient.newCall(request).execute())
 		{
-			conn = (HttpURLConnection) URI.create(uri).toURL().openConnection();
-			conn.setRequestMethod("GET");
-			conn.setUseCaches(false);
-			conn.setConnectTimeout(CONNECT_MS);
-			conn.setReadTimeout(READ_MS);
-			conn.setRequestProperty("Authorization", "Bearer " + accessJwt);
-			conn.setRequestProperty("Accept", "application/json");
-			conn.setRequestProperty("User-Agent",
-				"osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)");
-			conn.setRequestProperty("Cache-Control", "no-cache");
-
-			int rc = conn.getResponseCode();
-			if (rc != HttpURLConnection.HTTP_OK)
+			int rc = response.code();
+			if (rc != 200)
 			{
-				drainQuietly(rc >= 400 ? conn.getErrorStream() : conn.getInputStream());
 				return rc;
 			}
 
-			try (BufferedReader reader = new BufferedReader(
-				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
+			String respBody = response.body().string();
+			PluginStateResp state = gson.fromJson(respBody, PluginStateResp.class);
+			if (state == null || state.member == null)
 			{
-				PluginStateResp state = gson.fromJson(reader, PluginStateResp.class);
-				if (state == null || state.member == null)
-				{
-					return rc;
-				}
-				String itemsUrl = state.items != null && state.items.url != null ? state.items.url.trim() : null;
-				hubItemsSchemaVersionHint = state.items != null ? state.items.schemaVersion : null;
-				applyGroupAndMember(state.group, state.member, normalizeItemsUrl(itemsUrl, base));
-				captureRosterAndGroupSnapshot(state);
-				lastStateAtMs = System.currentTimeMillis();
+				return rc;
 			}
-			return HttpURLConnection.HTTP_OK;
+			String itemsUrl = state.items != null && state.items.url != null ? state.items.url.trim() : null;
+			hubItemsSchemaVersionHint = state.items != null ? state.items.schemaVersion : null;
+			applyGroupAndMember(state.group, state.member, normalizeItemsUrl(itemsUrl, base));
+			captureRosterAndGroupSnapshot(state);
+			lastStateAtMs = System.currentTimeMillis();
+			return 200;
 		}
 		catch (IOException e)
 		{
 			log.debug("plugin/v1/state failed", e);
 			return -1;
-		}
-		finally
-		{
-			if (conn != null)
-			{
-				conn.disconnect();
-			}
 		}
 	}
 
@@ -983,29 +957,26 @@ public class ColorLockGroupSync
 	{
 		String encodedSlug = URLEncoder.encode(slug, StandardCharsets.UTF_8).replace("+", "%20");
 		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_RESOLVE_V1 + encodedSlug);
-		HttpURLConnection conn = null;
-		try
+		String bodyJson = ColorLockAuthBodies.buildPluginResolveJson(slug, memberCode, jpRaw);
+		Request request = new Request.Builder()
+			.url(uri)
+			.post(RequestBody.create(MediaType.get("application/json; charset=utf-8"), bodyJson))
+			.header("Accept", "application/json")
+			.header("Cache-Control", "no-cache")
+			.header("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)")
+			.build();
+		try (Response response = httpClient.newCall(request).execute())
 		{
-			conn = openJsonPost(uri);
-			try (OutputStreamWriter w = new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8))
+			int rc = response.code();
+			if (rc != 200)
 			{
-				w.write(ColorLockAuthBodies.buildPluginResolveJson(slug, memberCode, jpRaw));
-			}
-
-			int rc = conn.getResponseCode();
-			if (rc != HttpURLConnection.HTTP_OK)
-			{
-				drainQuietly(conn.getErrorStream());
 				log.warn("plugin/v1/resolve HTTP {} for slug {}", rc, slug);
 				return false;
 			}
 
-			try (BufferedReader reader = new BufferedReader(
-				new java.io.InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
-			{
-				StatelessResolveResponse resp = gson.fromJson(reader, StatelessResolveResponse.class);
-				applyGroupAndMember(resp != null ? resp.group : null, resp != null ? resp.member : null, null);
-			}
+			String respBody = response.body().string();
+			StatelessResolveResponse resp = gson.fromJson(respBody, StatelessResolveResponse.class);
+			applyGroupAndMember(resp != null ? resp.group : null, resp != null ? resp.member : null, null);
 			return true;
 		}
 		catch (IOException e)
@@ -1013,57 +984,27 @@ public class ColorLockGroupSync
 			log.warn("plugin/v1/resolve failed for slug {}", slug, e);
 			return false;
 		}
-		finally
-		{
-			if (conn != null)
-			{
-				conn.disconnect();
-			}
-		}
 	}
 
-	private static HttpURLConnection openJsonPost(String uri) throws IOException
+	/** Reads response body and pulls out the hub-supplied {@code {error}} string; returns {@code null} on miss. */
+	private static String readErrorMessageQuietly(Response response)
 	{
-		HttpURLConnection conn = (HttpURLConnection) URI.create(uri).toURL().openConnection();
-		conn.setRequestMethod("POST");
-		conn.setUseCaches(false);
-		conn.setConnectTimeout(CONNECT_MS);
-		conn.setReadTimeout(READ_MS);
-		conn.setDoOutput(true);
-		conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-		conn.setRequestProperty("Accept", "application/json");
-		conn.setRequestProperty("Cache-Control", "no-cache");
-		conn.setRequestProperty("User-Agent",
-			"osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)");
-		return conn;
-	}
-
-	/** Reads error-stream body and pulls out the hub-supplied {@code {error}} string; returns {@code null} on miss. */
-	private static String readErrorMessageQuietly(HttpURLConnection conn)
-	{
-		InputStream es = conn.getErrorStream();
-		if (es == null)
+		if (response.body() == null)
 		{
 			return null;
 		}
-		try (BufferedReader reader = new BufferedReader(new java.io.InputStreamReader(es, StandardCharsets.UTF_8)))
+		try
 		{
-			StringBuilder sb = new StringBuilder(160);
-			char[] buf = new char[256];
-			int read;
-			while (sb.length() < 1024 && (read = reader.read(buf)) > 0)
-			{
-				sb.append(buf, 0, read);
-			}
-			String body = sb.toString().trim();
-			if (body.isEmpty())
+			String body = response.body().string();
+			if (body == null || body.trim().isEmpty())
 			{
 				return null;
 			}
+			String trimmed = body.trim();
 			try
 			{
 				@SuppressWarnings("deprecation")
-				com.google.gson.JsonElement parsed = new com.google.gson.JsonParser().parse(body);
+				com.google.gson.JsonElement parsed = new com.google.gson.JsonParser().parse(trimmed);
 				com.google.gson.JsonObject obj = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
 				if (obj != null && obj.has("error") && obj.get("error").isJsonPrimitive())
 				{
@@ -1077,33 +1018,11 @@ public class ColorLockGroupSync
 			catch (Exception ignored)
 			{
 			}
-			return body.length() > 240 ? body.substring(0, 240) : body;
+			return trimmed.length() > 240 ? trimmed.substring(0, 240) : trimmed;
 		}
 		catch (IOException ignored)
 		{
 			return null;
-		}
-	}
-
-	private static void drainQuietly(InputStream in)
-	{
-		if (in == null)
-		{
-			return;
-		}
-		try
-		{
-			in.readAllBytes();
-		}
-		catch (IOException ignored)
-		{
-		}
-		try
-		{
-			in.close();
-		}
-		catch (IOException ignored)
-		{
 		}
 	}
 

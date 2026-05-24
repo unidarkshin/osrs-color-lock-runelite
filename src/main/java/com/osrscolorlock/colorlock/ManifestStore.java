@@ -7,9 +7,6 @@ import net.runelite.client.game.ItemManager;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URI;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -18,9 +15,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32;
+
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import java.util.zip.CRC32;
 
 @Singleton
 public class ManifestStore
@@ -33,6 +36,7 @@ public class ManifestStore
 	private final ColorLockGroupSync groupSync;
 	private final ColorLockConfig config;
 	private final ScheduledExecutorService executor;
+	private final OkHttpClient httpClient;
 
 	private volatile Map<Integer, ManifestItem> byId = Collections.emptyMap();
 	private volatile int manifestSchemaVersion = -1;
@@ -45,10 +49,14 @@ public class ManifestStore
 	private volatile long lastManifestPayloadCrc = Long.MIN_VALUE;
 
 	@Inject
-	public ManifestStore(Gson gson, ClientThread clientThread, ColorLockGroupSync groupSync, ColorLockConfig config,
-		ScheduledExecutorService executor)
+	public ManifestStore(Gson gson, OkHttpClient httpClient, ClientThread clientThread, ColorLockGroupSync groupSync,
+		ColorLockConfig config, ScheduledExecutorService executor)
 	{
 		this.gson = gson;
+		this.httpClient = httpClient.newBuilder()
+			.connectTimeout(20, TimeUnit.SECONDS)
+			.readTimeout(120, TimeUnit.SECONDS)
+			.build();
 		this.clientThread = clientThread;
 		this.groupSync = groupSync;
 		this.config = config;
@@ -334,11 +342,15 @@ public class ManifestStore
 	void loadBlocking(String url) throws IOException
 	{
 		loadError = null;
-		HttpURLConnection conn = openItemsGet(url);
-		try
+		Request request = buildItemsGetRequest(url);
+		try (Response response = httpClient.newCall(request).execute())
 		{
-			int headerContract = parsePositiveHeader(conn, ColorLockApiContracts.HEADER_API_CONTRACT);
-			int headerSchema = parsePositiveHeader(conn, ColorLockApiContracts.HEADER_ITEMS_SCHEMA);
+			if (!response.isSuccessful())
+			{
+				throw new IOException("items manifest HTTP " + response.code());
+			}
+			int headerContract = parsePositiveHeader(response, ColorLockApiContracts.HEADER_API_CONTRACT);
+			int headerSchema = parsePositiveHeader(response, ColorLockApiContracts.HEADER_ITEMS_SCHEMA);
 			if (headerContract > 0
 				&& headerContract != ColorLockApiContracts.EXPECTED_ITEMS_API_CONTRACT_VERSION)
 			{
@@ -346,57 +358,40 @@ public class ManifestStore
 					ColorLockApiContracts.HEADER_API_CONTRACT, headerContract,
 					ColorLockApiContracts.EXPECTED_ITEMS_API_CONTRACT_VERSION);
 			}
-			byte[] raw;
-			try (InputStream in = conn.getInputStream())
-			{
-				raw = in.readAllBytes();
-			}
+			byte[] raw = response.body().bytes();
 			applyLoadedManifest(url, raw, headerSchema);
-		}
-		finally
-		{
-			conn.disconnect();
 		}
 	}
 
-	private HttpURLConnection openItemsGet(String url) throws IOException
+	private Request buildItemsGetRequest(String url)
 	{
-		HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
-		conn.setRequestMethod("GET");
-		conn.setUseCaches(false);
-		conn.setConnectTimeout(20_000);
-		conn.setReadTimeout(120_000);
-		conn.setRequestProperty("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)");
-		conn.setRequestProperty("Cache-Control", "no-cache");
-		conn.setRequestProperty("Pragma", "no-cache");
+		Request.Builder builder = new Request.Builder()
+			.url(url)
+			.header("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)")
+			.header("Cache-Control", "no-cache")
+			.header("Pragma", "no-cache");
 		if (ColorLockItemsApi.isHubItemsApiPath(url) && !ColorLockItemsApi.isStaticItemsJsonPath(url)
 			&& config.hubGroupSyncEnabled())
 		{
 			String token = groupSync.pluginAccessToken();
 			if (token != null && !token.isEmpty())
 			{
-				conn.setRequestProperty("Authorization", "Bearer " + token);
+				builder.header("Authorization", "Bearer " + token);
 			}
 		}
-		int httpCode = conn.getResponseCode();
-		if (httpCode != HttpURLConnection.HTTP_OK)
-		{
-			conn.disconnect();
-			throw new IOException("items manifest HTTP " + httpCode);
-		}
-		return conn;
+		return builder.build();
 	}
 
 	private byte[] downloadItemsPayload(String url) throws IOException
 	{
-		HttpURLConnection conn = openItemsGet(url);
-		try (InputStream in = conn.getInputStream())
+		Request request = buildItemsGetRequest(url);
+		try (Response response = httpClient.newCall(request).execute())
 		{
-			return in.readAllBytes();
-		}
-		finally
-		{
-			conn.disconnect();
+			if (!response.isSuccessful())
+			{
+				throw new IOException("items manifest HTTP " + response.code());
+			}
+			return response.body().bytes();
 		}
 	}
 
@@ -462,13 +457,13 @@ public class ManifestStore
 		}
 	}
 
-	private static int parsePositiveHeader(HttpURLConnection conn, String name)
+	private static int parsePositiveHeader(Response response, String name)
 	{
-		if (conn == null || name == null)
+		if (response == null || name == null)
 		{
 			return -1;
 		}
-		String v = conn.getHeaderField(name);
+		String v = response.header(name);
 		if (v == null || v.isEmpty())
 		{
 			return -1;

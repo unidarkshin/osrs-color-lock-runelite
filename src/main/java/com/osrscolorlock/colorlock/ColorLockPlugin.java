@@ -802,8 +802,8 @@ public class ColorLockPlugin extends Plugin
 		boolean active = groupSync.isLastMemberActive();
 		ColorLockColor hubNow = groupSync.getHubAssignedColor();
 
-		boolean authJwtOk = auth == java.net.HttpURLConnection.HTTP_OK;
-		boolean statelessResolveOk = auth == java.net.HttpURLConnection.HTTP_NOT_FOUND && ok && active;
+		boolean authJwtOk = auth == 200;
+		boolean statelessResolveOk = auth == 404 && ok && active;
 		if (!authJwtOk && !statelessResolveOk)
 		{
 			String friendly = mapAuthErrorToFriendlyText(auth, authErr);
