@@ -189,14 +189,6 @@ public class ManifestStore
 				return false;
 			}
 			log.debug("color-lock manifest retry {}/{} for {}", attempt + 1, MANIFEST_HTTP_RETRIES, url);
-			try
-			{
-				Thread.sleep(2000L * attempt);
-			}
-			catch (InterruptedException e)
-			{
-				return false;
-			}
 		}
 		return false;
 	}
