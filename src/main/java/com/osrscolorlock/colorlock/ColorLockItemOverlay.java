@@ -17,6 +17,7 @@ import net.runelite.client.ui.overlay.WidgetItemOverlay;
 public class ColorLockItemOverlay extends WidgetItemOverlay
 {
 	private static final Color MARK_RED = new Color(220, 40, 40);
+	private static final BasicStroke MARK_STROKE = new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
 
 	private final ColorLockConfig config;
 	private final ManifestStore manifestStore;
@@ -74,8 +75,7 @@ public class ColorLockItemOverlay extends WidgetItemOverlay
 		try
 		{
 			g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-			float w = Math.max(1.8f, arm / 5f);
-			g.setStroke(new BasicStroke(w, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+			g.setStroke(MARK_STROKE);
 			g.setColor(MARK_RED);
 			g.drawLine(x0, y0, x0 + arm, y0 + arm);
 			g.drawLine(x0 + arm, y0, x0, y0 + arm);

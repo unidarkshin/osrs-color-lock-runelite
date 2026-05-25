@@ -21,8 +21,8 @@ public interface ColorLockConfig extends Config
 		position = 10,
 		keyName = "groupSlug",
 		name = GROUP_ACCESS_CODE_CONFIG_NAME,
-		description = "Hub auth code (e.g. GeckoGlacier38#0723) or group slug / invite URL. "
-			+ "With Sync on, only the auth code is required."
+		description = "Your group auth code from the Color Lock hub (group.thegrandchart.com). "
+			+ "Format: GroupName#0000. With Sync on, this is all you need to join."
 	)
 	default String groupSlug()
 	{
@@ -56,9 +56,10 @@ public interface ColorLockConfig extends Config
 		position = 13,
 		keyName = "hubGroupSyncEnabled",
 		name = "Sync with group",
-		description = "Authenticate with your Group auth code (Slug#0000; Group password only if the group has one), "
-			+ "pull your assigned color, and reload item rules from the hub. While enabled, potion/food/ammo filters come from "
-			+ "the hub — not the manual toggles below. Changing credentials disables sync until you re-check this box."
+		description = "Connect to the Color Lock hub (group.thegrandchart.com) using your Group auth code. "
+			+ "Pulls your assigned color and item rules from the hub. While enabled, your RuneScape display name and "
+			+ "skill stats are sent to the hub on each heartbeat, and potion/food/ammo filters come from the hub — "
+			+ "not the manual toggles below. Changing credentials disables sync until you re-check this box."
 	)
 	default boolean hubGroupSyncEnabled()
 	{
@@ -69,8 +70,8 @@ public interface ColorLockConfig extends Config
 		position = 20,
 		keyName = "assignedColor",
 		name = ASSIGNED_COLOR_CONFIG_NAME,
-		description = "Manual fallback when Sync with group is off, or hub has no assigned color yet. "
-			+ "After a hub sync with an assigned color, we save it here, show it in the list, and gray this row until you turn sync off."
+		description = "Your assigned color for item restrictions. Used when Sync is off or the hub has no assignment yet. "
+			+ "When synced, the hub-assigned color is saved here automatically."
 	)
 	default ColorLockColor assignedColor()
 	{
@@ -81,7 +82,7 @@ public interface ColorLockConfig extends Config
 		position = 30,
 		keyName = "showColorOverlay",
 		name = "Mark restricted items",
-		description = "Red corner mark on inventory / bank / worn gear your color lock cannot use."
+		description = "Draws a red corner mark on items in inventory, bank, and worn equipment that your color cannot use."
 	)
 	default boolean showColorOverlay()
 	{

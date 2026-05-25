@@ -2,7 +2,9 @@ package com.osrscolorlock.colorlock;
 
 import com.google.gson.annotations.SerializedName;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /** Minimum fields described in DATA_CONTRACT.md; Gson ignores extras. */
@@ -33,6 +35,8 @@ public class ManifestItem
 	/** When {@code true}, hub opts this row out of lock enforcement (same effect as {@code colorLockApplies: false}). */
 	@SerializedName(value = "colorLockExcluded", alternate = {"color_lock_excluded"})
 	private Boolean colorLockExcluded;
+
+	private transient volatile List<String> normalizedUsableColors;
 
 	public int getId()
 	{
@@ -67,5 +71,36 @@ public class ManifestItem
 	public int getSchemaVersionNumber()
 	{
 		return schemaVersion == null ? -1 : schemaVersion.intValue();
+	}
+
+	List<String> getNormalizedUsableColors()
+	{
+		List<String> cached = normalizedUsableColors;
+		if (cached != null)
+		{
+			return cached;
+		}
+		List<String> raw = getUsableColors();
+		if (raw.isEmpty())
+		{
+			normalizedUsableColors = Collections.emptyList();
+			return normalizedUsableColors;
+		}
+		LinkedHashSet<String> deduped = new LinkedHashSet<>();
+		for (String c : raw)
+		{
+			if (c == null)
+			{
+				continue;
+			}
+			String t = c.trim();
+			if (!t.isEmpty())
+			{
+				deduped.add(t);
+			}
+		}
+		cached = Collections.unmodifiableList(new ArrayList<>(deduped));
+		normalizedUsableColors = cached;
+		return cached;
 	}
 }

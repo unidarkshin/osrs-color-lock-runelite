@@ -13,6 +13,8 @@ public final class ColorLockWeb
 	public static final String API_PLUGIN_ME = "/api/plugin/v1/me";
 	/** Versioned items endpoint (contract {@link ColorLockApiContracts#EXPECTED_ITEMS_API_CONTRACT_VERSION}). */
 	public static final String API_V1_ITEMS = "/api/v1/items";
+	/** Single-item detail endpoint; append the OSRS item id (e.g. {@code /api/v1/items/4151}). */
+	public static final String API_V1_ITEM_DETAIL = "/api/v1/items/";
 	/** Deprecated unversioned alias — same query params and payload as {@link #API_V1_ITEMS}. */
 	public static final String API_ITEMS_LEGACY = "/api/items";
 	/** Rule catalog (UI/docs); plugin uses per-row {@code colorLockApplies} from items instead. */

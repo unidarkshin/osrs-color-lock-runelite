@@ -4,7 +4,6 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Cursor;
-import java.awt.Desktop;
 import java.awt.Dimension;
 import java.awt.Container;
 import java.awt.FlowLayout;
@@ -14,7 +13,6 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
-import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -815,7 +813,133 @@ public class ColorLockLookupPanel extends PluginPanel
 		iconBody.add(bodyColumn, BorderLayout.CENTER);
 		row.add(iconBody);
 		attachWikiOpenToLookupRow(row, hit);
+		addDropSourcesToggle(row, hit);
 		return row;
+	}
+
+	private void addDropSourcesToggle(JPanel row, LookupHit hit)
+	{
+		JPanel sourcesContainer = new JPanel();
+		sourcesContainer.setLayout(new BoxLayout(sourcesContainer, BoxLayout.Y_AXIS));
+		sourcesContainer.setAlignmentX(Component.LEFT_ALIGNMENT);
+		sourcesContainer.setVisible(false);
+
+		JLabel toggle = new JLabel("▶ Drop sources");
+		toggle.setFont(toggle.getFont().deriveFont(Font.PLAIN, 11f));
+		toggle.setForeground(new Color(110, 140, 200));
+		toggle.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		toggle.setAlignmentX(Component.LEFT_ALIGNMENT);
+		toggle.setBorder(BorderFactory.createEmptyBorder(4, 4, 0, 0));
+
+		final boolean[] loaded = {false};
+		toggle.addMouseListener(new MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(MouseEvent e)
+			{
+				if (!SwingUtilities.isLeftMouseButton(e))
+				{
+					return;
+				}
+				e.consume();
+				if (sourcesContainer.isVisible())
+				{
+					sourcesContainer.setVisible(false);
+					toggle.setText("▶ Drop sources");
+					return;
+				}
+				if (!loaded[0])
+				{
+					loaded[0] = true;
+					toggle.setText("▼ Loading…");
+					manifestStore.fetchItemDropSourcesAsync(hit.itemId, sources ->
+						SwingUtilities.invokeLater(() -> {
+							sourcesContainer.removeAll();
+							if (sources.isEmpty())
+							{
+								JLabel none = new JLabel("No drop sources available.");
+								none.setFont(none.getFont().deriveFont(11f));
+								none.setForeground(new Color(150, 150, 160));
+								none.setBorder(BorderFactory.createEmptyBorder(2, 8, 2, 0));
+								sourcesContainer.add(none);
+							}
+							else
+							{
+								for (DropSourceInfo src : sources)
+								{
+									sourcesContainer.add(buildDropSourceRow(src));
+								}
+							}
+							toggle.setText("▼ Drop sources (" + sources.size() + ")");
+							sourcesContainer.setVisible(true);
+							sourcesContainer.revalidate();
+							sourcesContainer.repaint();
+						}));
+				}
+				else
+				{
+					sourcesContainer.setVisible(true);
+					toggle.setText("▼ Drop sources");
+				}
+			}
+		});
+
+		row.add(toggle);
+		row.add(sourcesContainer);
+	}
+
+	private static JPanel buildDropSourceRow(DropSourceInfo src)
+	{
+		JPanel dp = new JPanel(new BorderLayout(6, 0));
+		dp.setOpaque(false);
+		dp.setAlignmentX(Component.LEFT_ALIGNMENT);
+		dp.setBorder(BorderFactory.createEmptyBorder(2, 8, 2, 4));
+
+		String name = src.getMonsterName().isEmpty() ? "(unknown)" : src.getMonsterName();
+		JLabel nameLabel = new JLabel(name);
+		nameLabel.setFont(nameLabel.getFont().deriveFont(12f));
+		nameLabel.setForeground(new Color(210, 210, 210));
+		dp.add(nameLabel, BorderLayout.WEST);
+
+		String rarity = src.getRarityLabel().isEmpty()
+			? (src.getRarity() > 0 ? String.format("1/%.0f", 1.0 / src.getRarity()) : "")
+			: src.getRarityLabel();
+		String qty = src.getQuantity().isEmpty() ? "" : " (x" + src.getQuantity() + ")";
+		JLabel detail = new JLabel(rarity + qty);
+		detail.setFont(detail.getFont().deriveFont(11f));
+		detail.setForeground(new Color(150, 150, 160));
+		dp.add(detail, BorderLayout.EAST);
+
+		if (isOsrsWikiUrl(src.getMonsterWikiUrl()))
+		{
+			nameLabel.setForeground(new Color(108, 151, 255));
+			nameLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+			nameLabel.setToolTipText("Open wiki page");
+			nameLabel.addMouseListener(new MouseAdapter()
+			{
+				@Override
+				public void mouseClicked(MouseEvent e)
+				{
+					if (SwingUtilities.isLeftMouseButton(e))
+					{
+						LinkBrowser.browse(src.getMonsterWikiUrl());
+					}
+				}
+			});
+		}
+
+		return dp;
+	}
+
+	private static boolean isOsrsWikiUrl(String url)
+	{
+		if (url == null || url.isEmpty())
+		{
+			return false;
+		}
+		String lower = url.toLowerCase(Locale.ENGLISH);
+		return lower.startsWith("https://oldschool.runescape.wiki/")
+			|| lower.startsWith("https://secure.runescape.com/");
 	}
 
 	/** Same URL shape as RuneLite Wiki for item lookups (Special:Lookup + utm_source). */
@@ -941,25 +1065,10 @@ public class ColorLockLookupPanel extends PluginPanel
 			@Override
 			public void mouseClicked(java.awt.event.MouseEvent ev)
 			{
-				openInBrowser(url);
+				LinkBrowser.browse(url);
 			}
 		});
 		return ln;
-	}
-
-	private static void openInBrowser(String url)
-	{
-		if (!Desktop.isDesktopSupported())
-		{
-			return;
-		}
-		try
-		{
-			Desktop.getDesktop().browse(URI.create(url.trim()));
-		}
-		catch (Exception ignored)
-		{
-		}
 	}
 
 	/** Color-wheel nav icon: 8 OSRS palette slices, dark padlock-shackle accent. */

@@ -36,9 +36,9 @@ set REPO2=%USERPROFILE%\.runelite\repository2
 
 set RL_JAVA=%LOCALAPPDATA%\RuneLite\jre\bin\java.exe
 
-REM Heap for dev client (full repository2 classpath + sideload). Override: set RUNELITE_DEV_XMX=4096m
+REM Heap for dev client (full repository2 classpath + sideload). Override: set RUNELITE_DEV_XMX=1024m
 
-if not defined RUNELITE_DEV_XMX set RUNELITE_DEV_XMX=2048m
+if not defined RUNELITE_DEV_XMX set RUNELITE_DEV_XMX=512m
 
 
 

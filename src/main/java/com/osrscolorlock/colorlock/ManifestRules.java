@@ -1,7 +1,6 @@
 package com.osrscolorlock.colorlock;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -68,7 +67,7 @@ public final class ManifestRules
 		{
 			return false;
 		}
-		List<String> tokens = normalizeUsableTokens(row.getUsableColors());
+		List<String> tokens = row.getNormalizedUsableColors();
 		List<String> effective = effectiveUsable(tokens, crewPaletteLowercase);
 		if (effective.isEmpty())
 		{
@@ -91,7 +90,7 @@ public final class ManifestRules
 		{
 			return List.of();
 		}
-		return List.copyOf(normalizeUsableTokens(row.getUsableColors()));
+		return row.getNormalizedUsableColors();
 	}
 
 	/** Manifest colors that also appear in the crew-enabled palette (for UI). Empty if no crew filter applies. */
@@ -105,26 +104,7 @@ public final class ManifestRules
 		{
 			return List.of();
 		}
-		return List.copyOf(effectiveUsable(normalizeUsableTokens(row.getUsableColors()), crewPaletteLowercase));
-	}
-
-	private static List<String> normalizeUsableTokens(List<String> raw)
-	{
-		LinkedHashSet<String> out = new LinkedHashSet<>();
-		for (String c : raw)
-		{
-			if (c == null)
-			{
-				continue;
-			}
-			String t = c.trim();
-			if (t.isEmpty())
-			{
-				continue;
-			}
-			out.add(t);
-		}
-		return new ArrayList<>(out);
+		return List.copyOf(effectiveUsable(row.getNormalizedUsableColors(), crewPaletteLowercase));
 	}
 
 	private static List<String> effectiveUsable(List<String> normalizedManifestTokens,

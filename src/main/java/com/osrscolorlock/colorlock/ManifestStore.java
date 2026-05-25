@@ -1,12 +1,19 @@
 package com.osrscolorlock.colorlock;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.reflect.TypeToken;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.game.ItemManager;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.lang.reflect.Type;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -16,7 +23,6 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.zip.CRC32;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -36,7 +42,8 @@ public class ManifestStore
 	private final ColorLockGroupSync groupSync;
 	private final ColorLockConfig config;
 	private final ScheduledExecutorService executor;
-	private final OkHttpClient httpClient;
+	private final OkHttpClient manifestHttpClient;
+	private final OkHttpClient detailHttpClient;
 
 	private volatile Map<Integer, ManifestItem> byId = Collections.emptyMap();
 	private volatile int manifestSchemaVersion = -1;
@@ -44,18 +51,22 @@ public class ManifestStore
 	/** Absolute URL passed to {@link #loadBlocking}; used to detect hub items pointer changes without refetching. */
 	private volatile String lastLoadedManifestUrl;
 
-	/** After first successful load; used with payload CRC to spot silent manifest drift. */
+	/** After first successful load; item-count + schema fingerprint detects manifest drift. */
 	private volatile int lastSnapshotItemCount = -1;
-	private volatile long lastManifestPayloadCrc = Long.MIN_VALUE;
+	private volatile int lastSnapshotSchemaVersion = -1;
 
 	@Inject
 	public ManifestStore(Gson gson, OkHttpClient httpClient, ClientThread clientThread, ColorLockGroupSync groupSync,
 		ColorLockConfig config, ScheduledExecutorService executor)
 	{
 		this.gson = gson;
-		this.httpClient = httpClient.newBuilder()
+		this.manifestHttpClient = httpClient.newBuilder()
 			.connectTimeout(20, TimeUnit.SECONDS)
 			.readTimeout(120, TimeUnit.SECONDS)
+			.build();
+		this.detailHttpClient = httpClient.newBuilder()
+			.connectTimeout(10, TimeUnit.SECONDS)
+			.readTimeout(10, TimeUnit.SECONDS)
 			.build();
 		this.clientThread = clientThread;
 		this.groupSync = groupSync;
@@ -140,7 +151,7 @@ public class ManifestStore
 			boolean urlChanged = primary != null && !primary.equals(lastLoadedManifestUrl);
 			if (urlChanged)
 			{
-				lastManifestPayloadCrc = Long.MIN_VALUE;
+				lastSnapshotSchemaVersion = -1;
 			}
 			String loadedFrom = null;
 			if (tryLoadOrLogWithRetries(primary))
@@ -239,7 +250,8 @@ public class ManifestStore
 			return;
 		}
 		byId = Collections.unmodifiableMap(next);
-		lastManifestPayloadCrc = Long.MIN_VALUE;
+		lastSnapshotSchemaVersion = -1;
+
 		log.debug("color-lock removed {} potion rows (include potions off)", removed);
 	}
 
@@ -262,7 +274,8 @@ public class ManifestStore
 				next.put(row.getId(), row);
 			}
 			byId = Collections.unmodifiableMap(next);
-			lastManifestPayloadCrc = Long.MIN_VALUE;
+			lastSnapshotSchemaVersion = -1;
+	
 			loadError = null;
 			log.debug("color-lock potion supplement: {} rows ({})", potions.size(), url);
 		}
@@ -325,17 +338,94 @@ public class ManifestStore
 		});
 	}
 
+	/** Fetches drop sources for a single item from the hub detail endpoint. */
+	public void fetchItemDropSourcesAsync(int itemId, Consumer<List<DropSourceInfo>> onResult)
+	{
+		final String base = groupSync.getEffectiveItemsManifestUrl(config);
+		final String siteBase = ColorLockSites.deriveBaseSiteUrl(base);
+		if (siteBase.isEmpty())
+		{
+			onResult.accept(List.of());
+			return;
+		}
+		final String url = siteBase + ColorLockWeb.API_V1_ITEM_DETAIL + itemId;
+		executor.execute(() -> {
+			List<DropSourceInfo> sources;
+			try
+			{
+				sources = fetchDropSourcesBlocking(url);
+				log.debug("drop sources loaded {} entries for item {} from {}", sources.size(), itemId, url);
+			}
+			catch (IOException e)
+			{
+				log.debug("drop sources fetch failed for item {}: {}", itemId, e.getMessage());
+				sources = List.of();
+			}
+			final List<DropSourceInfo> result = sources;
+			onResult.accept(result);
+		});
+	}
+
+	private List<DropSourceInfo> fetchDropSourcesBlocking(String url) throws IOException
+	{
+		Request.Builder builder = new Request.Builder()
+			.url(url)
+			.header("User-Agent", "osrs-color-lock-runelite/1.0 (https://github.com/unidarkshin/osrs-color-lock)")
+			.header("Accept", "application/json");
+		if (config.hubGroupSyncEnabled())
+		{
+			String token = groupSync.pluginAccessToken();
+			if (token != null && !token.isEmpty())
+			{
+				builder.header("Authorization", "Bearer " + token);
+			}
+		}
+		try (Response response = detailHttpClient.newCall(builder.build()).execute())
+		{
+			if (!response.isSuccessful())
+			{
+				throw new IOException("item detail HTTP " + response.code());
+			}
+			@SuppressWarnings("deprecation")
+			JsonObject obj = new JsonParser().parse(
+				new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))
+				.getAsJsonObject();
+			JsonElement arr = obj.get("monsterDropSources");
+			if (arr == null || !arr.isJsonArray())
+			{
+				return List.of();
+			}
+			Type listType = TypeToken.getParameterized(List.class, DropSourceInfo.class).getType();
+			List<DropSourceInfo> list = gson.fromJson(arr, listType);
+			return list == null ? List.of() : list;
+		}
+	}
+
 	List<ManifestItem> fetchItemsListBlocking(String url) throws IOException
 	{
-		byte[] raw = downloadItemsPayload(url);
-		return ManifestJson.readItemsUtf8(gson, raw);
+		Request request = buildItemsGetRequest(url);
+		try (Response response = manifestHttpClient.newCall(request).execute())
+		{
+			if (!response.isSuccessful())
+			{
+				throw new IOException("items manifest HTTP " + response.code());
+			}
+			return ManifestJson.readItemsStreaming(gson, response.body().byteStream());
+		}
 	}
 
 	void loadBlocking(String url) throws IOException
 	{
 		loadError = null;
+
+		if (lastSnapshotItemCount > 0 && isManifestUnchangedViaHead(url))
+		{
+			log.debug("manifest HEAD unchanged (schema={}); skipping full GET", lastSnapshotSchemaVersion);
+			return;
+		}
+
 		Request request = buildItemsGetRequest(url);
-		try (Response response = httpClient.newCall(request).execute())
+		try (Response response = manifestHttpClient.newCall(request).execute())
 		{
 			if (!response.isSuccessful())
 			{
@@ -350,8 +440,30 @@ public class ManifestStore
 					ColorLockApiContracts.HEADER_API_CONTRACT, headerContract,
 					ColorLockApiContracts.EXPECTED_ITEMS_API_CONTRACT_VERSION);
 			}
-			byte[] raw = response.body().bytes();
-			applyLoadedManifest(url, raw, headerSchema);
+			List<ManifestItem> list = ManifestJson.readItemsStreaming(gson, response.body().byteStream());
+			applyLoadedManifest(url, list, headerSchema);
+		}
+	}
+
+	private boolean isManifestUnchangedViaHead(String url)
+	{
+		try
+		{
+			Request head = buildItemsGetRequest(url).newBuilder().head().build();
+			try (Response response = manifestHttpClient.newCall(head).execute())
+			{
+				if (!response.isSuccessful())
+				{
+					return false;
+				}
+				int headSchema = parsePositiveHeader(response, ColorLockApiContracts.HEADER_ITEMS_SCHEMA);
+				return headSchema > 0 && headSchema == lastSnapshotSchemaVersion;
+			}
+		}
+		catch (IOException e)
+		{
+			log.debug("manifest HEAD check failed, falling through to GET: {}", e.getMessage());
+			return false;
 		}
 	}
 
@@ -374,24 +486,8 @@ public class ManifestStore
 		return builder.build();
 	}
 
-	private byte[] downloadItemsPayload(String url) throws IOException
+	private void applyLoadedManifest(String url, List<ManifestItem> list, int headerSchema)
 	{
-		Request request = buildItemsGetRequest(url);
-		try (Response response = httpClient.newCall(request).execute())
-		{
-			if (!response.isSuccessful())
-			{
-				throw new IOException("items manifest HTTP " + response.code());
-			}
-			return response.body().bytes();
-		}
-	}
-
-	private void applyLoadedManifest(String url, byte[] raw, int headerSchema) throws IOException
-	{
-		long crcVal = crc32(raw);
-		List<ManifestItem> list = ManifestJson.readItemsUtf8(gson, raw);
-
 		HashMap<Integer, ManifestItem> next = new HashMap<>(Math.max(list.size() * 2, 64));
 		int duplicateIds = 0;
 		Integer schemaSeen = null;
@@ -427,13 +523,13 @@ public class ManifestStore
 		}
 		lastLoadedManifestUrl = url;
 
-		boolean firstLoad = lastSnapshotItemCount < 0;
-		boolean drift = !firstLoad && crcVal != lastManifestPayloadCrc;
 		int n = byId.size();
 		int s = manifestSchemaVersion;
+		boolean firstLoad = lastSnapshotItemCount < 0;
+		boolean drift = !firstLoad && (n != lastSnapshotItemCount || s != lastSnapshotSchemaVersion);
 
-		lastManifestPayloadCrc = crcVal;
 		lastSnapshotItemCount = n;
+		lastSnapshotSchemaVersion = s;
 
 		if (drift)
 		{
@@ -445,7 +541,7 @@ public class ManifestStore
 		}
 		else
 		{
-			log.debug("manifest refresh unchanged ({} entries, crc32={})", n, String.format("%08x", crcVal));
+			log.debug("manifest refresh unchanged ({} entries, schema={})", n, s);
 		}
 	}
 
@@ -471,10 +567,4 @@ public class ManifestStore
 		}
 	}
 
-	private static long crc32(byte[] raw)
-	{
-		CRC32 c = new CRC32();
-		c.update(raw);
-		return c.getValue();
-	}
 }

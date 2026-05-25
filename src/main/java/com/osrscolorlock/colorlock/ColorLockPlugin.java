@@ -10,7 +10,6 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -54,8 +53,10 @@ import net.runelite.client.ui.overlay.OverlayManager;
 	name = "Color Locked",
 	description = "Group Iron color-lock enforcement. Blocks Eat/Drink/Equip/Wield/Wear/Release on items restricted by your "
 		+ "assigned color. Strips Mine/Chop when carrying a restricted pickaxe or axe. Marks restricted items with a red "
-		+ "overlay in inventory, bank, and worn equipment. Includes a sidebar for looking up which items your color can "
-		+ "use. Syncs your assigned color and item rules from a hub group, or runs standalone with manual settings.",
+		+ "corner mark in inventory, bank, and worn equipment. Includes a sidebar for looking up which items your color can "
+		+ "use and viewing drop sources. Syncs your assigned color and item rules from the Color Lock hub "
+		+ "(group.thegrandchart.com) — when sync is on, your RuneScape display name and skill stats are sent to the hub. "
+		+ "Also works standalone with manual settings.",
 	tags = {"ironman", "gim", "color-lock", "groupiron", "color", "lock", "restriction"}
 )
 public class ColorLockPlugin extends Plugin
@@ -444,20 +445,14 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
-		List<MenuEntry> remove = new ArrayList<>();
 		for (MenuEntry e : entries)
 		{
 			if (shouldStripMenuEntry(e))
 			{
-				remove.add(e);
+				e.setOption("");
+				e.setTarget("");
+				menu.removeMenuEntry(e);
 			}
-		}
-		for (MenuEntry e : remove)
-		{
-			// If remove fails or leaves a ghost row, blank text so nothing usable shows.
-			e.setOption("");
-			e.setTarget("");
-			menu.removeMenuEntry(e);
 		}
 	}
 

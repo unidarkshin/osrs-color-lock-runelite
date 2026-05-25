@@ -1,15 +1,14 @@
 package com.osrscolorlock.colorlock;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.google.gson.reflect.TypeToken;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
 
 import java.io.IOException;
-import java.io.Reader;
-import java.lang.reflect.Type;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -17,73 +16,82 @@ import java.util.Map;
 
 final class ManifestJson
 {
-	private static final Type LIST_TYPE = TypeToken.getParameterized(List.class, ManifestItem.class).getType();
-
 	private ManifestJson()
 	{
 	}
 
-	static List<ManifestItem> readItemsUtf8(Gson gson, byte[] utf8Body) throws IOException
+	static List<ManifestItem> readItemsStreaming(Gson gson, InputStream in) throws IOException
 	{
-		String json = new String(utf8Body, java.nio.charset.StandardCharsets.UTF_8);
-		@SuppressWarnings("deprecation")
-		JsonElement root = new JsonParser().parse(json);
-		return readItemsJson(gson, root);
+		try (JsonReader reader = new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)))
+		{
+			reader.setLenient(true);
+			return readItemsFromReader(gson, reader);
+		}
 	}
 
-	static List<ManifestItem> readItems(Gson gson, Reader reader) throws IOException
+	private static List<ManifestItem> readItemsFromReader(Gson gson, JsonReader reader) throws IOException
 	{
-		List<ManifestItem> list = gson.fromJson(reader, LIST_TYPE);
-		if (list == null || list.isEmpty())
+		JsonToken first = reader.peek();
+		if (first == JsonToken.BEGIN_ARRAY)
 		{
-			throw new IOException("manifest empty");
+			return readArray(gson, reader);
 		}
-		return list;
+		if (first == JsonToken.BEGIN_OBJECT)
+		{
+			return readWrappedArray(gson, reader);
+		}
+		throw new IOException("manifest payload must be a JSON array or an object wrapping an array");
 	}
 
-	private static List<ManifestItem> readItemsJson(Gson gson, JsonElement root) throws IOException
+	private static List<ManifestItem> readWrappedArray(Gson gson, JsonReader reader) throws IOException
 	{
-		JsonElement arrayEl = unwrapToArray(root);
-		if (!arrayEl.isJsonArray())
+		reader.beginObject();
+		while (reader.hasNext())
 		{
-			throw new IOException("manifest payload must be a JSON array or an object wrapping an array");
-		}
-		JsonArray arr = arrayEl.getAsJsonArray();
-		List<ManifestItem> list = gson.fromJson(arr, LIST_TYPE);
-		if (list == null || list.isEmpty())
-		{
-			throw new IOException("manifest empty");
-		}
-		return list;
-	}
-
-	private static JsonElement unwrapToArray(JsonElement root)
-	{
-		if (root == null || root.isJsonNull())
-		{
-			return root;
-		}
-		if (root.isJsonArray())
-		{
-			return root;
-		}
-		if (!root.isJsonObject())
-		{
-			return root;
-		}
-		JsonObject o = root.getAsJsonObject();
-		for (String k : new String[] {"items", "data"})
-		{
-			if (o.has(k))
+			String key = reader.nextName();
+			if ("items".equals(key) || "data".equals(key))
 			{
-				JsonElement inner = o.get(k);
-				if (inner.isJsonArray())
+				if (reader.peek() == JsonToken.BEGIN_ARRAY)
 				{
-					return inner;
+					List<ManifestItem> list = readArray(gson, reader);
+					skipRemainingObject(reader);
+					return list;
 				}
 			}
+			reader.skipValue();
 		}
-		return root;
+		reader.endObject();
+		throw new IOException("manifest object has no 'items' or 'data' array");
+	}
+
+	private static void skipRemainingObject(JsonReader reader) throws IOException
+	{
+		while (reader.hasNext())
+		{
+			reader.nextName();
+			reader.skipValue();
+		}
+		reader.endObject();
+	}
+
+	private static List<ManifestItem> readArray(Gson gson, JsonReader reader) throws IOException
+	{
+		List<ManifestItem> list = new ArrayList<>();
+		reader.beginArray();
+		while (reader.hasNext())
+		{
+			ManifestItem item = gson.fromJson(reader, ManifestItem.class);
+			if (item != null)
+			{
+				list.add(item);
+			}
+		}
+		reader.endArray();
+		if (list.isEmpty())
+		{
+			throw new IOException("manifest empty");
+		}
+		return list;
 	}
 
 	static Map<Integer, ManifestItem> toUnmodifiableMap(List<ManifestItem> list)

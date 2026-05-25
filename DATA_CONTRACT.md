@@ -84,7 +84,7 @@ Request body (everything except `runescapeUsername` is optional):
 | `presence.online` | optional | `true` on heartbeats, `false` on shutdown / on the sync-off PATCH. |
 | `currentColor` | optional | The plugin's effective color (hub-assigned when synced, else the manual `assignedColor`). Audit-only — never changes `member.assignedColor`. |
 | `sync.enabled` | optional | Sent exactly once per checkbox toggle so the hub history can timestamp the event and snapshot `currentColor`. Omitted on regular heartbeats. |
-| `stats` | optional | Not sent today; reserved for future skill/HP/prayer snapshots. |
+| `stats` | optional | Skill levels, current hitpoints, and current prayer sent on each heartbeat (added in v1.1). Contains `stats.skills` (all skill levels), `stats.hitpoints` (boosted HP), and `stats.prayer` (boosted prayer). |
 
 Hub considers members stale after ~180 s without a heartbeat, so a 60 s cadence keeps presence stable across short network hiccups. Response carries `X-OCL-API-Contract-Version: 8` (`ColorLockApiContracts.EXPECTED_PLUGIN_ME_API_CONTRACT_VERSION`).
 

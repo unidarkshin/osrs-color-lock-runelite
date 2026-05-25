@@ -28,13 +28,40 @@ Color Locked talks to **one host:** `group.thegrandchart.com`. Nothing is sent a
 |---------|------|-----|
 | `POST /api/plugin/v1/auth` | Group code, Member code, optional Group password | Trade for a short-lived Bearer JWT. |
 | `GET  /api/plugin/v1/state` | Bearer JWT | Read your assigned color and group palette. |
-| `PATCH /api/plugin/v1/me` (~every 60 s while logged in) | Bearer JWT, your in-game display name, `presence.online`, `currentColor`; also `sync.enabled` when you toggle the checkbox | Heartbeat for online status + desync audit. |
+| `PATCH /api/plugin/v1/me` (~every 60 s while logged in) | Bearer JWT, your in-game display name, `presence.online`, `currentColor`, skill levels, current HP and prayer; also `sync.enabled` when you toggle the checkbox | Heartbeat for online status, skill tracking, and desync audit. |
 | `GET  {state.items.url}`, `GET /api/v1/items?colored=1&groupFilters=1&…`, or deprecated `GET /api/items?…` (last retry) | Bearer JWT when synced | Filtered item rules JSON (group potion/food/ammo policy). |
 | `POST /api/plugin/v1/resolve/{slug}` | Group code + Member code + Group password when needed | Fallback when `POST …/auth` returns HTTP 404 before JWT `/auth` is fully deployed server-side. |
 
-The plugin does **not** send: account name, bank contents, chat, location, hashes, IP, telemetry, or anything else not listed above. The JWT is held in memory only and discarded on plugin disable or shutdown. Credentials are stored in the standard RuneLite config (same place as every other plugin).
+The plugin does **not** send: bank contents, chat, location, hashes, IP, telemetry, or anything else not listed above. The JWT is held in memory only and discarded on plugin disable or shutdown. Credentials are stored in the standard RuneLite config (same place as every other plugin).
 
 Toggle **Sync with group** off to stop all network traffic except the public item rules pull.
+
+## Increasing RuneLite memory (recommended if using many plugins)
+
+If RuneLite feels laggy or freezes with many plugins active, increase the client's heap size from the default 512 MB:
+
+### Windows
+
+1. Open the Start menu and search for **RuneLite (configure)**.
+   - Alternatively, open a terminal and run: `"%LOCALAPPDATA%\RuneLite\RuneLite.exe" --configure`
+2. A settings window appears. Find the **JVM Arguments** field.
+3. Add `-Xmx1024m` (sets the max heap to 1 GB). If other arguments are already there, add it at the end separated by a space.
+4. Click **Save**.
+5. Launch RuneLite through the **Jagex Launcher** as usual — the new memory setting is applied automatically.
+
+### macOS
+
+1. Open a terminal and run: `/Applications/RuneLite.app/Contents/MacOS/RuneLite --configure`
+2. Add `-Xmx1024m` to the **JVM Arguments** field and click **Save**.
+3. Launch RuneLite through the **Jagex Launcher** as usual.
+
+### Linux
+
+1. Run: `runelite --configure` (or the full path to your RuneLite install).
+2. Add `-Xmx1024m` to the **JVM Arguments** field and click **Save**.
+3. Launch RuneLite through the **Jagex Launcher** as usual.
+
+The setting persists across launches until you change it. If you still experience lag with many plugins (especially 117 HD), try `-Xmx1536m` or `-Xmx2048m`.
 
 ## Build
 
