@@ -85,7 +85,7 @@ public class ColorLockLookupPanel extends PluginPanel
 	private final JTextField queryField = new JTextField(18);
 	private final JButton searchButton = new JButton("Search");
 	private final JCheckBox myPaletteOnlyCheckbox = new JCheckBox("My palette only");
-	private final JCheckBox allColorsListingsCheckbox = new JCheckBox("All-colors only");
+	private final JCheckBox allColorsListingsCheckbox = new JCheckBox("Shared items (any color)");
 	private final JPanel resultsPanel;
 	private final JTabbedPane tabs = new JTabbedPane();
 	private final JPanel groupRosterColumn = new JPanel();
@@ -149,7 +149,7 @@ public class ColorLockLookupPanel extends PluginPanel
 		}
 		myPaletteOnlyCheckbox.setSelected(palCfg);
 		myPaletteOnlyCheckbox.setToolTipText(
-			"Fetches hub items with usableBy=your color and groupFilters (potion/food/ammo per sync). Mutually exclusive with All-colors-only.");
+			"Fetches hub items with usableBy=your color and groupFilters (potion/food/ammo per sync). Mutually exclusive with Shared items filter.");
 		myPaletteOnlyCheckbox.setAlignmentX(Component.LEFT_ALIGNMENT);
 		JPanel paletteRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
 		paletteRow.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -158,32 +158,19 @@ public class ColorLockLookupPanel extends PluginPanel
 
 		allColorsListingsCheckbox.setSelected(optOutCfg);
 		allColorsListingsCheckbox.setToolTipText(
-			"Only hub listings that opted out (shown as \"All colors\" — potions, throwables…). Exclusive with palette filter.");
+			"Show only items usable by any color (potions, throwables, etc). Exclusive with palette filter.");
 		allColorsListingsCheckbox.setAlignmentX(Component.LEFT_ALIGNMENT);
 		JPanel optOutRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
 		optOutRow.setAlignmentX(Component.LEFT_ALIGNMENT);
 		optOutRow.add(allColorsListingsCheckbox);
 		north.add(optOutRow);
 
-		JPanel south = new JPanel();
-		south.setLayout(new BoxLayout(south, BoxLayout.Y_AXIS));
-		south.setAlignmentX(Component.LEFT_ALIGNMENT);
-		JLabel hint0 = new JLabel("<html><body style='width:220px'>Matches client item names. Icons load from cache.</body></html>");
-		hint0.setAlignmentX(Component.LEFT_ALIGNMENT);
-		south.add(hint0);
-		south.add(Box.createVerticalStrut(6));
-		JLabel siteHead = new JLabel("<html><body style='width:220px'><b>Color Locked hub</b></body></html>");
-		siteHead.setAlignmentX(Component.LEFT_ALIGNMENT);
-		south.add(siteHead);
-		south.add(urlLink(ColorLockWeb.HUB));
-		south.add(urlLink(ColorLockWeb.ITEMS_PAGE));
-
 		itemsTab.add(north, BorderLayout.NORTH);
 		itemsTab.add(scroll, BorderLayout.CENTER);
-		itemsTab.add(south, BorderLayout.SOUTH);
 
 		tabs.addTab("Items", itemsTab);
 		tabs.addTab("Group", buildGroupTab());
+		tabs.addTab("Info", buildInfoTab());
 		tabs.addChangeListener(e -> {
 			if (isGroupTabSelected())
 			{
@@ -260,6 +247,56 @@ public class ColorLockLookupPanel extends PluginPanel
 	private boolean isGroupTabSelected()
 	{
 		return tabs.getSelectedIndex() == 1;
+	}
+
+	private JPanel buildInfoTab()
+	{
+		JPanel root = new JPanel();
+		root.setLayout(new BoxLayout(root, BoxLayout.Y_AXIS));
+		root.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+		JLabel linksHead = new JLabel("<html><body style='width:220px'><b>Color Lock Hub</b></body></html>");
+		linksHead.setAlignmentX(Component.LEFT_ALIGNMENT);
+		root.add(linksHead);
+		root.add(Box.createVerticalStrut(4));
+		root.add(urlLink(ColorLockWeb.HUB));
+		root.add(urlLink(ColorLockWeb.ITEMS_PAGE));
+		root.add(urlLink(ColorLockWeb.HUB + "gear"));
+
+		root.add(Box.createVerticalStrut(16));
+		JLabel progressHead = new JLabel("<html><body style='width:220px'><b>Progression</b></body></html>");
+		progressHead.setAlignmentX(Component.LEFT_ALIGNMENT);
+		root.add(progressHead);
+		root.add(Box.createVerticalStrut(4));
+		JLabel progressHint = new JLabel("<html><body style='width:220px'>Visit the Gear page on the hub to see recommended gear upgrades and quest progression for your color lock.</body></html>");
+		progressHint.setForeground(new Color(170, 170, 180));
+		progressHint.setAlignmentX(Component.LEFT_ALIGNMENT);
+		root.add(progressHint);
+
+		root.add(Box.createVerticalStrut(16));
+		JLabel aboutHead = new JLabel("<html><body style='width:220px'><b>About</b></body></html>");
+		aboutHead.setAlignmentX(Component.LEFT_ALIGNMENT);
+		root.add(aboutHead);
+		root.add(Box.createVerticalStrut(4));
+		JLabel about = new JLabel("<html><body style='width:220px'>Color Locked enforces item color restrictions for Group Iron teams. Sync with the hub to share assignments and see your roster.</body></html>");
+		about.setForeground(new Color(170, 170, 180));
+		about.setAlignmentX(Component.LEFT_ALIGNMENT);
+		root.add(about);
+
+		root.add(Box.createVerticalGlue());
+
+		JPanel wrapper = new JPanel(new BorderLayout());
+		wrapper.add(root, BorderLayout.NORTH);
+		JScrollPane scroll = new JScrollPane(
+			wrapper,
+			ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+			ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+		scroll.getVerticalScrollBar().setUnitIncrement(16);
+		scroll.setBorder(BorderFactory.createEmptyBorder());
+
+		JPanel tab = new JPanel(new BorderLayout());
+		tab.add(scroll, BorderLayout.CENTER);
+		return tab;
 	}
 
 	private JPanel buildGroupTab()
@@ -542,7 +579,7 @@ public class ColorLockLookupPanel extends PluginPanel
 	private void showPlaceholderIntro()
 	{
 		resultsPanel.removeAll();
-		JLabel intro = new JLabel("<html><body style='width:220px'>Type part of a name (at least 2 letters), then <b>Search</b>. Each row lists palette colors as swatches (hover for the color name). Tick <b>All-colors only</b> with an empty search to browse every opt-out item.</body></html>");
+		JLabel intro = new JLabel("<html><body style='width:220px'>Type part of a name (at least 2 letters), then <b>Search</b>. Each row lists palette colors as swatches (hover for the color name). Tick <b>Shared items (any color)</b> with an empty search to browse every unrestricted item.</body></html>");
 		intro.setAlignmentX(Component.LEFT_ALIGNMENT);
 		resultsPanel.add(intro);
 		resultsPanel.revalidate();
@@ -569,7 +606,7 @@ public class ColorLockLookupPanel extends PluginPanel
 
 		SwingUtilities.invokeLater(() -> {
 			resultsPanel.removeAll();
-			resultsPanel.add(new JLabel(browseAllColors ? "Loading All-colors items…" : "Searching…"));
+			resultsPanel.add(new JLabel(browseAllColors ? "Loading shared items…" : "Searching…"));
 			resultsPanel.revalidate();
 			resultsPanel.repaint();
 		});
@@ -593,6 +630,8 @@ public class ColorLockLookupPanel extends PluginPanel
 	private void collectLookupHitsFromRows(List<ManifestItem> rows, String query, Consumer<List<LookupHit>> done)
 	{
 		List<LookupHit> hits = new ArrayList<>();
+		java.util.Set<Integer> seenCanon = new java.util.HashSet<>();
+		java.util.Set<String> seenBaseNames = new java.util.HashSet<>();
 		for (ManifestItem row : rows)
 		{
 			if (hits.size() >= MAX_RESULTS || row == null || row.getUsableColors().isEmpty())
@@ -611,6 +650,15 @@ public class ColorLockLookupPanel extends PluginPanel
 			}
 			int id = row.getId();
 			int canon = itemManager.canonicalize(id);
+			if (!seenCanon.add(canon))
+			{
+				continue;
+			}
+			String baseName = stripChargedSuffix(nameLc);
+			if (!seenBaseNames.add(baseName))
+			{
+				continue;
+			}
 			if (!passesLookupFilters(row, id, true))
 			{
 				continue;
@@ -623,6 +671,7 @@ public class ColorLockLookupPanel extends PluginPanel
 	private void scanClientItemsForLookup(String query, List<LookupHit> hits)
 	{
 		int maxId = client.getItemCount();
+		java.util.Set<String> seenBaseNames = new java.util.HashSet<>();
 		for (int id = 0; id < maxId && hits.size() < MAX_RESULTS; id++)
 		{
 			ItemComposition def = client.getItemDefinition(id);
@@ -641,6 +690,11 @@ public class ColorLockLookupPanel extends PluginPanel
 			}
 			int canon = itemManager.canonicalize(id);
 			if (id != canon)
+			{
+				continue;
+			}
+			String baseName = stripChargedSuffix(name.toLowerCase(Locale.ENGLISH));
+			if (!seenBaseNames.add(baseName))
 			{
 				continue;
 			}
@@ -707,7 +761,7 @@ public class ColorLockLookupPanel extends PluginPanel
 			}
 			else if (allColorsListingsCheckbox.isSelected())
 			{
-				msg = "No All-colors items in the current manifest.";
+				msg = "No shared (any-color) items in the current manifest.";
 			}
 			else
 			{
@@ -1041,6 +1095,13 @@ public class ColorLockLookupPanel extends PluginPanel
 	{
 		int textBudgetPx = PluginPanel.PANEL_WIDTH - ICON_SLOT - 44;
 		return Math.max(2, Math.min(10, textBudgetPx / 22));
+	}
+
+	private static final java.util.regex.Pattern CHARGED_SUFFIX = java.util.regex.Pattern.compile("\\(\\d+\\)$");
+
+	private static String stripChargedSuffix(String nameLc)
+	{
+		return CHARGED_SUFFIX.matcher(nameLc).replaceFirst("").trim();
 	}
 
 	private static String escapeHtml(String s)

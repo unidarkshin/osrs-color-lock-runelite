@@ -21,8 +21,8 @@ public interface ColorLockConfig extends Config
 		position = 10,
 		keyName = "groupSlug",
 		name = GROUP_ACCESS_CODE_CONFIG_NAME,
-		description = "Your group auth code from the Color Lock hub (group.thegrandchart.com). "
-			+ "Format: GroupName#0000. With Sync on, this is all you need to join."
+		description = "Paste your Group#0000 code from the Color Lock hub.",
+		secret = true
 	)
 	default String groupSlug()
 	{
@@ -33,7 +33,8 @@ public interface ColorLockConfig extends Config
 		position = 11,
 		keyName = "groupJoinPasscode",
 		name = "Group password",
-		description = "Optional. Only required when the hub group is protected with a join password; leave blank otherwise."
+		description = "Only needed if the group has a join password.",
+		secret = true
 	)
 	default String groupJoinPasscode()
 	{
@@ -44,8 +45,7 @@ public interface ColorLockConfig extends Config
 		position = 12,
 		keyName = "memberPublicCode",
 		name = "Member code (legacy)",
-		description = "Optional. Only for old groups that still use a word member code (e.g. Frog12) with a separate group slug. "
-			+ "Leave blank when using Group auth code (Slug#0000)."
+		description = "Legacy word code (e.g. Frog12). Leave blank for new groups."
 	)
 	default String memberPublicCode()
 	{
@@ -56,10 +56,7 @@ public interface ColorLockConfig extends Config
 		position = 13,
 		keyName = "hubGroupSyncEnabled",
 		name = "Sync with group",
-		description = "Connect to the Color Lock hub (group.thegrandchart.com) using your Group auth code. "
-			+ "Pulls your assigned color and item rules from the hub. While enabled, your RuneScape display name and "
-			+ "skill stats are sent to the hub on each heartbeat, and potion/food/ammo filters come from the hub — "
-			+ "not the manual toggles below. Changing credentials disables sync until you re-check this box."
+		description = "Pull your color and item rules from the hub. Sends your display name and stats while enabled."
 	)
 	default boolean hubGroupSyncEnabled()
 	{
@@ -70,8 +67,7 @@ public interface ColorLockConfig extends Config
 		position = 20,
 		keyName = "assignedColor",
 		name = ASSIGNED_COLOR_CONFIG_NAME,
-		description = "Your assigned color for item restrictions. Used when Sync is off or the hub has no assignment yet. "
-			+ "When synced, the hub-assigned color is saved here automatically."
+		description = "Your color for item restrictions. Overwritten by hub when synced."
 	)
 	default ColorLockColor assignedColor()
 	{
@@ -90,10 +86,32 @@ public interface ColorLockConfig extends Config
 	}
 
 	@ConfigItem(
+		position = 32,
+		keyName = "showColorSwatches",
+		name = "Color swatches on hover",
+		description = "Show which colors can use an item when you hover over it."
+	)
+	default boolean showColorSwatches()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		position = 35,
+		keyName = "showLookupPanel",
+		name = "Show lookup sidebar",
+		description = "Show the Color Locked lookup panel in the sidebar for searching items by color."
+	)
+	default boolean showLookupPanel()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		position = 40,
 		keyName = "manualLockPotionsToColors",
 		name = MANUAL_LOCK_POTIONS_CONFIG_NAME,
-		description = "Download potion rows for color-lock rules. Only used when Sync with group is off."
+		description = "Include potions in color-lock rules. Ignored when synced."
 	)
 	default boolean manualLockPotionsToColors()
 	{
@@ -104,7 +122,7 @@ public interface ColorLockConfig extends Config
 		position = 41,
 		keyName = "manualIncludeFood",
 		name = MANUAL_INCLUDE_FOOD_CONFIG_NAME,
-		description = "Download food / heal rows for color-lock rules. Only used when Sync with group is off (default on)."
+		description = "Include food in color-lock rules. Ignored when synced."
 	)
 	default boolean manualIncludeFood()
 	{
@@ -115,7 +133,7 @@ public interface ColorLockConfig extends Config
 		position = 42,
 		keyName = "manualLockAmmunitionToColors",
 		name = MANUAL_LOCK_AMMUNITION_CONFIG_NAME,
-		description = "Download stack ammunition (arrows, bolts, …) for color-lock rules. Only used when Sync with group is off."
+		description = "Include ammunition in color-lock rules. Ignored when synced."
 	)
 	default boolean manualLockAmmunitionToColors()
 	{

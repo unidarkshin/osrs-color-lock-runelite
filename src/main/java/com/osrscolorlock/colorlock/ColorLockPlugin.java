@@ -33,7 +33,10 @@ import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.ChatMessageType;
+import net.runelite.api.Quest;
+import net.runelite.api.QuestState;
 import net.runelite.api.Skill;
+import net.runelite.api.Varbits;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatColorType;
 import net.runelite.client.chat.ChatMessageBuilder;
@@ -51,12 +54,8 @@ import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 @PluginDescriptor(
 	name = "Color Locked",
-	description = "Group Iron color-lock enforcement. Blocks Eat/Drink/Equip/Wield/Wear/Release on items restricted by your "
-		+ "assigned color. Strips Mine/Chop when carrying a restricted pickaxe or axe. Marks restricted items with a red "
-		+ "corner mark in inventory, bank, and worn equipment. Includes a sidebar for looking up which items your color can "
-		+ "use and viewing drop sources. Syncs your assigned color and item rules from the Color Lock hub "
-		+ "(group.thegrandchart.com) — when sync is on, your RuneScape display name and skill stats are sent to the hub. "
-		+ "Also works standalone with manual settings.",
+	description = "Group Iron color-lock enforcement. Blocks use of items restricted by your assigned color, "
+		+ "marks them in inventory/bank/equipment, and syncs rules from the Color Lock hub.",
 	tags = {"ironman", "gim", "color-lock", "groupiron", "color", "lock", "restriction"}
 )
 public class ColorLockPlugin extends Plugin
@@ -191,7 +190,10 @@ public class ColorLockPlugin extends Plugin
 			.priority(7)
 			.panel(lookupPanelProvider.get())
 			.build();
-		clientToolbar.addNavigation(lookupNavButton);
+		if (config.showLookupPanel())
+		{
+			clientToolbar.addNavigation(lookupNavButton);
+		}
 		kickoffFetch();
 		lastDebouncedRefreshMs = 0L;
 		schedulePeriodicManifestRefresh();
@@ -317,6 +319,20 @@ public class ColorLockPlugin extends Plugin
 			}
 			return;
 		}
+		if ("showLookupPanel".equals(key))
+		{
+			SwingUtilities.invokeLater(() -> {
+				if (config.showLookupPanel())
+				{
+					clientToolbar.addNavigation(lookupNavButton);
+				}
+				else
+				{
+					try { clientToolbar.removeNavigation(lookupNavButton); } catch (RuntimeException ignored) { }
+				}
+			});
+			return;
+		}
 		if (MANUAL_ITEM_FILTER_KEYS.contains(key))
 		{
 			if (!config.hubGroupSyncEnabled())
@@ -356,6 +372,8 @@ public class ColorLockPlugin extends Plugin
 		}
 	}
 
+	private static final String RESTRICTED_TOOL_LABEL = "Unequip restricted tool";
+
 	@Subscribe
 	public void onMenuEntryAdded(MenuEntryAdded event)
 	{
@@ -364,12 +382,16 @@ public class ColorLockPlugin extends Plugin
 		{
 			return;
 		}
+		if (isRestrictedGatherEntry(e))
+		{
+			e.setOption(RESTRICTED_TOOL_LABEL);
+			e.setDeprioritized(true);
+			return;
+		}
 		if (!shouldStripMenuEntry(e))
 		{
 			return;
 		}
-		// Left-click default skips deprioritized ops; right-click list still stripped each frame.
-		// Tags on target text are preserved so native OSRS color highlighting stays intact.
 		e.setDeprioritized(true);
 	}
 
@@ -447,6 +469,12 @@ public class ColorLockPlugin extends Plugin
 		}
 		for (MenuEntry e : entries)
 		{
+			if (isRestrictedGatherEntry(e))
+			{
+				e.setOption(RESTRICTED_TOOL_LABEL);
+				e.setDeprioritized(true);
+				continue;
+			}
 			if (shouldStripMenuEntry(e))
 			{
 				e.setOption("");
@@ -474,6 +502,11 @@ public class ColorLockPlugin extends Plugin
 		}
 	}
 
+	private boolean isRestrictedGatherEntry(MenuEntry e)
+	{
+		return ColorLockSkillingGate.shouldStripGatherMenu(client, itemManager, manifestStore, assignment(), e);
+	}
+
 	private boolean shouldStripMenuEntry(MenuEntry e)
 	{
 		if (manifestStore.itemCount() == 0)
@@ -484,7 +517,7 @@ public class ColorLockPlugin extends Plugin
 		{
 			return true;
 		}
-		return ColorLockSkillingGate.shouldStripGatherMenu(client, itemManager, manifestStore, assignment(), e);
+		return isRestrictedGatherEntry(e);
 	}
 
 	private boolean restrictInventoryUseMenuEntry(MenuEntry e)
@@ -574,7 +607,9 @@ public class ColorLockPlugin extends Plugin
 			Boolean toggle = pendingSyncToggle;
 			pendingSyncToggle = null;
 			java.util.Map<String, Integer> stats = gatherStats();
-			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle, stats,
+			List<String> quests = gatherCompletedQuests();
+			List<String> diaries = gatherCompletedDiaries();
+			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle, stats, quests, diaries,
 				this::pullStateAndMirrorColorOnHeartbeat);
 		});
 	}
@@ -605,7 +640,7 @@ public class ColorLockPlugin extends Plugin
 			done.run();
 			return;
 		}
-		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, null, done);
+		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, null, null, null, done);
 	}
 
 	private String currentEffectiveColorKey()
@@ -632,6 +667,75 @@ public class ColorLockPlugin extends Plugin
 		stats.put("hitpoints_current", client.getBoostedSkillLevel(Skill.HITPOINTS));
 		stats.put("prayer_current", client.getBoostedSkillLevel(Skill.PRAYER));
 		return stats;
+	}
+
+	private List<String> gatherCompletedQuests()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return null;
+		}
+		List<String> completed = new java.util.ArrayList<>();
+		for (Quest q : Quest.values())
+		{
+			try
+			{
+				if (q.getState(client) == QuestState.FINISHED)
+				{
+					completed.add(q.getName());
+				}
+			}
+			catch (RuntimeException ignored)
+			{
+			}
+		}
+		return completed.isEmpty() ? null : completed;
+	}
+
+	private static final int[][] DIARY_VARBITS = {
+		{Varbits.DIARY_ARDOUGNE_EASY, Varbits.DIARY_ARDOUGNE_MEDIUM, Varbits.DIARY_ARDOUGNE_HARD, Varbits.DIARY_ARDOUGNE_ELITE},
+		{Varbits.DIARY_DESERT_EASY, Varbits.DIARY_DESERT_MEDIUM, Varbits.DIARY_DESERT_HARD, Varbits.DIARY_DESERT_ELITE},
+		{Varbits.DIARY_FALADOR_EASY, Varbits.DIARY_FALADOR_MEDIUM, Varbits.DIARY_FALADOR_HARD, Varbits.DIARY_FALADOR_ELITE},
+		{Varbits.DIARY_FREMENNIK_EASY, Varbits.DIARY_FREMENNIK_MEDIUM, Varbits.DIARY_FREMENNIK_HARD, Varbits.DIARY_FREMENNIK_ELITE},
+		{Varbits.DIARY_KANDARIN_EASY, Varbits.DIARY_KANDARIN_MEDIUM, Varbits.DIARY_KANDARIN_HARD, Varbits.DIARY_KANDARIN_ELITE},
+		{Varbits.DIARY_KARAMJA_EASY, Varbits.DIARY_KARAMJA_MEDIUM, Varbits.DIARY_KARAMJA_HARD, Varbits.DIARY_KARAMJA_ELITE},
+		{Varbits.DIARY_KOUREND_EASY, Varbits.DIARY_KOUREND_MEDIUM, Varbits.DIARY_KOUREND_HARD, Varbits.DIARY_KOUREND_ELITE},
+		{Varbits.DIARY_LUMBRIDGE_EASY, Varbits.DIARY_LUMBRIDGE_MEDIUM, Varbits.DIARY_LUMBRIDGE_HARD, Varbits.DIARY_LUMBRIDGE_ELITE},
+		{Varbits.DIARY_MORYTANIA_EASY, Varbits.DIARY_MORYTANIA_MEDIUM, Varbits.DIARY_MORYTANIA_HARD, Varbits.DIARY_MORYTANIA_ELITE},
+		{Varbits.DIARY_VARROCK_EASY, Varbits.DIARY_VARROCK_MEDIUM, Varbits.DIARY_VARROCK_HARD, Varbits.DIARY_VARROCK_ELITE},
+		{Varbits.DIARY_WESTERN_EASY, Varbits.DIARY_WESTERN_MEDIUM, Varbits.DIARY_WESTERN_HARD, Varbits.DIARY_WESTERN_ELITE},
+		{Varbits.DIARY_WILDERNESS_EASY, Varbits.DIARY_WILDERNESS_MEDIUM, Varbits.DIARY_WILDERNESS_HARD, Varbits.DIARY_WILDERNESS_ELITE},
+	};
+	private static final String[] DIARY_REGIONS = {
+		"Ardougne", "Desert", "Falador", "Fremennik", "Kandarin", "Karamja",
+		"Kourend", "Lumbridge", "Morytania", "Varrock", "Western", "Wilderness"
+	};
+	private static final String[] DIARY_TIERS = {"Easy", "Medium", "Hard", "Elite"};
+
+	private List<String> gatherCompletedDiaries()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return null;
+		}
+		List<String> completed = new java.util.ArrayList<>();
+		for (int r = 0; r < DIARY_REGIONS.length; r++)
+		{
+			for (int t = 0; t < DIARY_TIERS.length; t++)
+			{
+				try
+				{
+					if (client.getVarbitValue(DIARY_VARBITS[r][t]) == 1)
+					{
+						completed.add(DIARY_REGIONS[r] + " " + DIARY_TIERS[t]);
+					}
+				}
+				catch (RuntimeException ignored)
+				{
+				}
+			}
+		}
+		return completed.isEmpty() ? null : completed;
 	}
 
 	/**
@@ -907,28 +1011,20 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		int curSchema = manifestStore.manifestSchemaVersion();
-		StringBuilder parts = new StringBuilder();
 		if (prevSchema > 0 && curSchema > 0 && prevSchema != curSchema)
 		{
-			parts.append("schema ").append(prevSchema).append(" -> ").append(curSchema);
+			log.info("Items schema changed {} -> {}; rules refreshed.", prevSchema, curSchema);
 		}
 		if (curSchema > 0 && curSchema != EXPECTED_SCHEMA_VERSION)
 		{
-			if (parts.length() > 0) parts.append("; ");
-			parts.append("plugin update may be needed (schema ").append(curSchema)
-				.append(" vs expected ").append(EXPECTED_SCHEMA_VERSION).append(")");
-		}
-		if (parts.length() > 0)
-		{
-			postChatBanner("Color Locked: items updated (" + parts + ").");
+			log.warn("Items schemaVersion={} plugin expects {} — see DATA_CONTRACT.md", curSchema, EXPECTED_SCHEMA_VERSION);
 		}
 	}
 
 	private void postChatBanner(String text)
 	{
-		final String chatLine = text;
-		final String body;
 		String prefix = "Color Locked: ";
+		final String body;
 		if (text != null && text.startsWith(prefix))
 		{
 			body = text.substring(prefix.length());
@@ -947,7 +1043,7 @@ public class ColorLockPlugin extends Plugin
 			.type(ChatMessageType.GAMEMESSAGE)
 			.runeLiteFormattedMessage(formatted)
 			.build()));
-		log.info(chatLine);
+		log.info(text);
 	}
 
 	private void validateSchemaQuietly()

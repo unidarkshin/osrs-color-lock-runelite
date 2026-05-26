@@ -491,19 +491,19 @@ public class ColorLockGroupSync
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Runnable onFinishClientThread)
 	{
-		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, null, onFinishClientThread);
+		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, null, null, null, onFinishClientThread);
 	}
 
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats,
-		Runnable onFinishClientThread)
+		List<String> completedQuests, List<String> completedDiaries, Runnable onFinishClientThread)
 	{
 		executor.execute(() -> {
 			try
 			{
 				synchronized (sessionLock)
 				{
-					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled, stats);
+					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled, stats, completedQuests, completedDiaries);
 				}
 			}
 			finally
@@ -537,7 +537,7 @@ public class ColorLockGroupSync
 	}
 
 	private int patchMeBlocking(ColorLockConfig config, String runescapeName, boolean presenceOnline,
-		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats)
+		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats, List<String> completedQuests, List<String> completedDiaries)
 	{
 		boolean isSyncToggleEvent = syncToggleEnabled != null;
 		if (config == null)
@@ -586,34 +586,78 @@ public class ColorLockGroupSync
 		{
 			bodySb.append(",\"sync\":{\"enabled\":").append(syncToggleEnabled.booleanValue()).append("}");
 		}
-		if (stats != null && !stats.isEmpty())
+		boolean hasStats = stats != null && !stats.isEmpty();
+		boolean hasQuests = completedQuests != null && !completedQuests.isEmpty();
+		boolean hasDiaries = completedDiaries != null && !completedDiaries.isEmpty();
+		if (hasStats || hasQuests || hasDiaries)
 		{
-			bodySb.append(",\"stats\":{\"skills\":{");
-			boolean first = true;
-			for (Map.Entry<String, Integer> e : stats.entrySet())
+			bodySb.append(",\"stats\":{");
+			boolean statsFieldWritten = false;
+			if (hasStats)
 			{
-				String key = e.getKey();
-				if ("hitpoints_current".equals(key) || "prayer_current".equals(key))
+				bodySb.append("\"skills\":{");
+				boolean first = true;
+				for (Map.Entry<String, Integer> e : stats.entrySet())
 				{
-					continue;
+					String key = e.getKey();
+					if ("hitpoints_current".equals(key) || "prayer_current".equals(key))
+					{
+						continue;
+					}
+					if (!first)
+					{
+						bodySb.append(',');
+					}
+					bodySb.append('"').append(key).append("\":").append(e.getValue());
+					first = false;
 				}
-				if (!first)
+				bodySb.append('}');
+				statsFieldWritten = true;
+				Integer hp = stats.get("hitpoints_current");
+				Integer pray = stats.get("prayer_current");
+				if (hp != null)
+				{
+					bodySb.append(",\"hitpoints\":").append(hp);
+				}
+				if (pray != null)
+				{
+					bodySb.append(",\"prayer\":").append(pray);
+				}
+			}
+			if (hasQuests)
+			{
+				if (statsFieldWritten)
 				{
 					bodySb.append(',');
 				}
-				bodySb.append('"').append(key).append("\":").append(e.getValue());
-				first = false;
+				bodySb.append("\"completedQuests\":[");
+				for (int qi = 0; qi < completedQuests.size(); qi++)
+				{
+					if (qi > 0)
+					{
+						bodySb.append(',');
+					}
+					bodySb.append('"').append(ColorLockAuthBodies.gsonEscape(completedQuests.get(qi))).append('"');
+				}
+				bodySb.append(']');
+				statsFieldWritten = true;
 			}
-			bodySb.append('}');
-			Integer hp = stats.get("hitpoints_current");
-			Integer pray = stats.get("prayer_current");
-			if (hp != null)
+			if (hasDiaries)
 			{
-				bodySb.append(",\"hitpoints\":").append(hp);
-			}
-			if (pray != null)
-			{
-				bodySb.append(",\"prayer\":").append(pray);
+				if (statsFieldWritten)
+				{
+					bodySb.append(',');
+				}
+				bodySb.append("\"completedDiaries\":[");
+				for (int di = 0; di < completedDiaries.size(); di++)
+				{
+					if (di > 0)
+					{
+						bodySb.append(',');
+					}
+					bodySb.append('"').append(ColorLockAuthBodies.gsonEscape(completedDiaries.get(di))).append('"');
+				}
+				bodySb.append(']');
 			}
 			bodySb.append('}');
 		}
