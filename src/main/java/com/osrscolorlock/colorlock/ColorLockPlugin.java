@@ -372,7 +372,7 @@ public class ColorLockPlugin extends Plugin
 		}
 	}
 
-	private static final String RESTRICTED_TOOL_LABEL = "Unequip restricted tool";
+	private static final String RESTRICTED_TOOL_LABEL = "Restricted tool held";
 
 	@Subscribe
 	public void onMenuEntryAdded(MenuEntryAdded event)
@@ -385,7 +385,6 @@ public class ColorLockPlugin extends Plugin
 		if (isRestrictedGatherEntry(e))
 		{
 			e.setOption(RESTRICTED_TOOL_LABEL);
-			e.setDeprioritized(true);
 			return;
 		}
 		if (!shouldStripMenuEntry(e))
@@ -472,7 +471,6 @@ public class ColorLockPlugin extends Plugin
 			if (isRestrictedGatherEntry(e))
 			{
 				e.setOption(RESTRICTED_TOOL_LABEL);
-				e.setDeprioritized(true);
 				continue;
 			}
 			if (shouldStripMenuEntry(e))
@@ -496,7 +494,7 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		MenuEntry me = event.getMenuEntry();
-		if (shouldStripMenuEntry(me))
+		if (RESTRICTED_TOOL_LABEL.equals(me.getOption()) || shouldStripMenuEntry(me))
 		{
 			event.consume();
 		}
