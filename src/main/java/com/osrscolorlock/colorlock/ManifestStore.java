@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -44,6 +45,7 @@ public class ManifestStore
 	private final ScheduledExecutorService executor;
 	private final OkHttpClient manifestHttpClient;
 	private final OkHttpClient detailHttpClient;
+	private final ManifestDiskCache diskCache;
 
 	private volatile Map<Integer, ManifestItem> byId = Collections.emptyMap();
 	private volatile int manifestSchemaVersion = -1;
@@ -54,6 +56,8 @@ public class ManifestStore
 	/** After first successful load; item-count + schema fingerprint detects manifest drift. */
 	private volatile int lastSnapshotItemCount = -1;
 	private volatile int lastSnapshotSchemaVersion = -1;
+	/** When true, the next successful hub manifest fetch this login may write the disk cache once. */
+	private volatile boolean saveDiskCacheAfterLoginNetworkFetch;
 
 	@Inject
 	public ManifestStore(Gson gson, OkHttpClient httpClient, ClientThread clientThread, ColorLockGroupSync groupSync,
@@ -72,6 +76,7 @@ public class ManifestStore
 		this.groupSync = groupSync;
 		this.config = config;
 		this.executor = executor;
+		this.diskCache = new ManifestDiskCache(gson);
 	}
 
 	public String lastLoadError()
@@ -128,7 +133,8 @@ public class ManifestStore
 	{
 		Set<String> crew = groupSync.manifestRuleCrewFilter(config);
 		ManifestItem row = itemManager != null ? getListedManifestItem(itemId, itemManager) : byId.get(itemId);
-		return ManifestRules.isRestrictedForAssignment(row, assignment, crew);
+		Set<String> inProgress = groupSync.getEffectiveInProgressQuestKeys();
+		return ManifestRules.isRestrictedForAssignment(row, assignment, crew, inProgress);
 	}
 
 	private static boolean hasListedColors(ManifestItem row)
@@ -141,12 +147,19 @@ public class ManifestStore
 		return lastLoadedManifestUrl;
 	}
 
+	/** Arm a single disk write after the next successful network manifest fetch this login. */
+	public void notifyPlayerLoggedIn()
+	{
+		saveDiskCacheAfterLoginNetworkFetch = true;
+	}
+
 	public void downloadAsync(Runnable onClientThreadFinish)
 	{
 		final String primary = groupSync.getEffectiveItemsManifestUrl(config);
 		final String fallbackV1 = groupSync.getDefaultItemsManifestUrl(config);
 		final String fallbackLegacy = groupSync.getLegacyItemsManifestUrl(config);
 		executor.execute(() -> {
+			restoreFromDiskIfEmpty();
 			log.debug("color-lock manifest fetching {}", primary);
 			boolean urlChanged = primary != null && !primary.equals(lastLoadedManifestUrl);
 			if (urlChanged)
@@ -178,7 +191,15 @@ public class ManifestStore
 			}
 			String reconcileBase = loadedFrom != null ? loadedFrom
 				: (fallbackV1 != null && !fallbackV1.isEmpty() ? fallbackV1 : primary);
+			if (loadedFrom == null)
+			{
+				restoreFromDiskIfEmpty();
+			}
 			reconcilePotionRows(reconcileBase);
+			if (loadedFrom != null)
+			{
+				persistToDiskOnceAfterLoginNetworkFetch();
+			}
 			clientThread.invokeLater(onClientThreadFinish);
 		});
 	}
@@ -543,6 +564,35 @@ public class ManifestStore
 		{
 			log.debug("manifest refresh unchanged ({} entries, schema={})", n, s);
 		}
+	}
+
+	private void restoreFromDiskIfEmpty()
+	{
+		if (!byId.isEmpty())
+		{
+			return;
+		}
+		ManifestDiskCache.Snapshot snap = diskCache.load();
+		if (snap == null)
+		{
+			return;
+		}
+		String url = snap.sourceUrl == null ? "" : snap.sourceUrl;
+		int schema = snap.schemaVersion > 0 ? snap.schemaVersion : -1;
+		applyLoadedManifest(url, snap.items, schema);
+		log.info("color-lock manifest restored {} items from disk cache (schema {}, saved {})",
+			byId.size(), manifestSchemaVersion, snap.savedAt == null ? "?" : snap.savedAt);
+	}
+
+	private void persistToDiskOnceAfterLoginNetworkFetch()
+	{
+		if (!saveDiskCacheAfterLoginNetworkFetch || byId.isEmpty())
+		{
+			return;
+		}
+		saveDiskCacheAfterLoginNetworkFetch = false;
+		diskCache.save(lastLoadedManifestUrl, manifestSchemaVersion, new ArrayList<>(byId.values()));
+		log.info("color-lock manifest saved to disk cache ({} items, schema {})", byId.size(), manifestSchemaVersion);
 	}
 
 	private static int parsePositiveHeader(Response response, String name)

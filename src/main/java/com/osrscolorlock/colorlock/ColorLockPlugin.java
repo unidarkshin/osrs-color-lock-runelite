@@ -11,6 +11,7 @@ import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -29,6 +30,7 @@ import net.runelite.api.MenuEntry;
 import net.runelite.api.events.BeforeMenuRender;
 import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
@@ -54,9 +56,10 @@ import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 @PluginDescriptor(
 	name = "Color Locked",
-	description = "Group Iron color-lock enforcement. Blocks use of items restricted by your assigned color, "
-		+ "marks them in inventory/bank/equipment, and syncs rules from the Color Lock hub.",
-	tags = {"ironman", "gim", "color-lock", "groupiron", "color", "lock", "restriction"}
+	description = "Group Iron color-lock for the Color Lock hub. Sync team color and rules; block wrong-color "
+		+ "items and restricted tools; quest tools temporarily allowed for any color while that quest is in progress. "
+		+ "Manual mode and offline rules from a local cache.",
+	tags = {"ironman", "gim", "color-lock", "groupiron", "color", "lock", "restriction", "quest", "hub"}
 )
 public class ColorLockPlugin extends Plugin
 {
@@ -83,6 +86,9 @@ public class ColorLockPlugin extends Plugin
 
 	/** Presence heartbeat to PATCH /api/plugin/v1/me; hub considers a member stale after ~180s. */
 	private static final int ME_HEARTBEAT_INTERVAL_SECONDS = 60;
+
+	/** Debounce quest scans after varbit changes (quests are var-driven). */
+	private static final long QUEST_PROGRESS_DEBOUNCE_MS = 2_000L;
 
 	/** Strip config keys we no longer expose so old profiles don't carry stale state. */
 	private void purgeDeprecatedConfigKeys()
@@ -158,6 +164,9 @@ public class ColorLockPlugin extends Plugin
 
 	private ScheduledFuture<?> scheduledManifestRefresh;
 	private ScheduledFuture<?> scheduledMeHeartbeat;
+	private ScheduledFuture<?> scheduledQuestHubSync;
+	private ScheduledFuture<?> scheduledQuestProgressCheck;
+	private int lastQuestProgressFingerprint = Integer.MIN_VALUE;
 	private volatile long lastDebouncedRefreshMs;
 	private volatile long lastSettingsOpenResyncMs;
 	private volatile boolean settingsPanelOpenLastTick;
@@ -196,9 +205,15 @@ public class ColorLockPlugin extends Plugin
 		}
 		kickoffFetch();
 		lastDebouncedRefreshMs = 0L;
+		lastQuestProgressFingerprint = Integer.MIN_VALUE;
 		schedulePeriodicManifestRefresh();
 		schedulePeriodicMeHeartbeat();
 		startSettingsMuteTimer();
+		if (client.getGameState() == GameState.LOGGED_IN)
+		{
+			manifestStore.notifyPlayerLoggedIn();
+			refreshQuestProgressIfChanged();
+		}
 		if (config.hubGroupSyncEnabled() && hubCredentialsFilled(config)
 			&& client.getGameState() == GameState.LOGGED_IN)
 		{
@@ -229,6 +244,8 @@ public class ColorLockPlugin extends Plugin
 		}
 		cancelPeriodicManifestRefresh();
 		cancelPeriodicMeHeartbeat();
+		cancelQuestHubSync();
+		cancelQuestProgressCheck();
 		stopSettingsMuteTimer();
 		sendPresenceOfflineBestEffort();
 	}
@@ -365,7 +382,10 @@ public class ColorLockPlugin extends Plugin
 			}
 			lastDebouncedRefreshMs = now;
 		}
+		manifestStore.notifyPlayerLoggedIn();
 		kickoffFetch();
+		lastQuestProgressFingerprint = Integer.MIN_VALUE;
+		refreshQuestProgressIfChanged();
 		if (config.hubGroupSyncEnabled() && hubCredentialsFilled(config))
 		{
 			runLoginVerification();
@@ -416,6 +436,16 @@ public class ColorLockPlugin extends Plugin
 			return;
 		}
 		stripOpenMenu();
+	}
+
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		scheduleQuestProgressCheckDebounced();
 	}
 
 	@Subscribe
@@ -581,6 +611,35 @@ public class ColorLockPlugin extends Plugin
 		}
 	}
 
+	private void cancelQuestHubSync()
+	{
+		if (scheduledQuestHubSync != null)
+		{
+			scheduledQuestHubSync.cancel(false);
+			scheduledQuestHubSync = null;
+		}
+	}
+
+	private void cancelQuestProgressCheck()
+	{
+		if (scheduledQuestProgressCheck != null)
+		{
+			scheduledQuestProgressCheck.cancel(false);
+			scheduledQuestProgressCheck = null;
+		}
+	}
+
+	private void scheduleQuestProgressCheckDebounced()
+	{
+		if (scheduledQuestProgressCheck != null)
+		{
+			scheduledQuestProgressCheck.cancel(false);
+		}
+		scheduledQuestProgressCheck = scheduledExecutor.schedule(
+			() -> clientThread.invokeLater(this::refreshQuestProgressIfChanged),
+			QUEST_PROGRESS_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+	}
+
 	private void tickMeHeartbeat()
 	{
 		if (!config.hubGroupSyncEnabled() || !hubCredentialsFilled(config))
@@ -596,6 +655,7 @@ public class ColorLockPlugin extends Plugin
 			{
 				return;
 			}
+			refreshQuestProgressIfChanged();
 			String name = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
 			if (name == null || name.isBlank())
 			{
@@ -606,8 +666,9 @@ public class ColorLockPlugin extends Plugin
 			pendingSyncToggle = null;
 			java.util.Map<String, Integer> stats = gatherStats();
 			List<String> quests = gatherCompletedQuests();
+			List<String> inProgress = gatherInProgressQuestNames();
 			List<String> diaries = gatherCompletedDiaries();
-			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle, stats, quests, diaries,
+			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle, stats, quests, inProgress, diaries,
 				this::pullStateAndMirrorColorOnHeartbeat);
 		});
 	}
@@ -638,7 +699,7 @@ public class ColorLockPlugin extends Plugin
 			done.run();
 			return;
 		}
-		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, null, null, null, done);
+		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, null, null, null, null, done);
 	}
 
 	private String currentEffectiveColorKey()
@@ -688,6 +749,105 @@ public class ColorLockPlugin extends Plugin
 			}
 		}
 		return completed.isEmpty() ? null : completed;
+	}
+
+	/** RuneLite display names for PATCH {@code stats.inProgressQuests} (hub normalizes to catalog keys). */
+	private List<String> gatherInProgressQuestNames()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return null;
+		}
+		List<String> inProgress = new java.util.ArrayList<>();
+		for (Quest q : Quest.values())
+		{
+			try
+			{
+				if (q.getState(client) == QuestState.IN_PROGRESS)
+				{
+					inProgress.add(q.getName());
+				}
+			}
+			catch (RuntimeException ignored)
+			{
+			}
+		}
+		return inProgress.isEmpty() ? null : inProgress;
+	}
+
+	private Set<String> gatherInProgressQuestKeys()
+	{
+		List<String> names = gatherInProgressQuestNames();
+		if (names == null)
+		{
+			return Set.of();
+		}
+		return PluginQuestKeys.normalizeAll(names);
+	}
+
+	private int computeQuestProgressFingerprint()
+	{
+		int h = 17;
+		for (Quest q : Quest.values())
+		{
+			try
+			{
+				if (q.getState(client) == QuestState.IN_PROGRESS)
+				{
+					h = 31 * h + q.ordinal();
+				}
+			}
+			catch (RuntimeException ignored)
+			{
+			}
+		}
+		return h;
+	}
+
+	private void refreshQuestProgressIfChanged()
+	{
+		int fp = computeQuestProgressFingerprint();
+		if (fp == lastQuestProgressFingerprint)
+		{
+			return;
+		}
+		lastQuestProgressFingerprint = fp;
+		Set<String> keys = gatherInProgressQuestKeys();
+		groupSync.setLocalInProgressQuestKeys(keys);
+		scheduleQuestHubSyncDebounced();
+	}
+
+	private void scheduleQuestHubSyncDebounced()
+	{
+		if (!config.hubGroupSyncEnabled() || !groupSync.isResolvedOk())
+		{
+			return;
+		}
+		if (scheduledQuestHubSync != null)
+		{
+			scheduledQuestHubSync.cancel(false);
+		}
+		scheduledQuestHubSync = scheduledExecutor.schedule(this::fireQuestProgressHubSync, QUEST_PROGRESS_DEBOUNCE_MS,
+			TimeUnit.MILLISECONDS);
+	}
+
+	private void fireQuestProgressHubSync()
+	{
+		clientThread.invokeLater(() -> {
+			if (client.getGameState() != GameState.LOGGED_IN)
+			{
+				return;
+			}
+			String name = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
+			if (name == null || name.isBlank())
+			{
+				return;
+			}
+			java.util.Map<String, Integer> stats = gatherStats();
+			List<String> inProgress = gatherInProgressQuestNames();
+			groupSync.patchMeAsync(config, name, true, currentEffectiveColorKey(), null, stats, null, inProgress, null,
+				this::pullStateAndMirrorColorOnHeartbeat);
+		});
 	}
 
 	private static final int[][] DIARY_VARBITS = {

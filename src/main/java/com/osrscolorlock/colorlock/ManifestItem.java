@@ -36,7 +36,12 @@ public class ManifestItem
 	@SerializedName(value = "colorLockExcluded", alternate = {"color_lock_excluded"})
 	private Boolean colorLockExcluded;
 
+	/** Quest catalog keys — allow any team color while any key is in the player's in-progress quest set. */
+	@SerializedName(value = "questColorLockKeys", alternate = {"quest_color_lock_keys"})
+	private List<String> questColorLockKeys;
+
 	private transient volatile List<String> normalizedUsableColors;
+	private transient volatile List<String> normalizedQuestColorLockKeys;
 
 	public int getId()
 	{
@@ -66,6 +71,42 @@ public class ManifestItem
 	public Boolean getColorLockExcluded()
 	{
 		return colorLockExcluded;
+	}
+
+	public List<String> getQuestColorLockKeys()
+	{
+		return questColorLockKeys == null ? Collections.emptyList() : questColorLockKeys;
+	}
+
+	List<String> getNormalizedQuestColorLockKeys()
+	{
+		List<String> cached = normalizedQuestColorLockKeys;
+		if (cached != null)
+		{
+			return cached;
+		}
+		List<String> raw = getQuestColorLockKeys();
+		if (raw.isEmpty())
+		{
+			normalizedQuestColorLockKeys = Collections.emptyList();
+			return normalizedQuestColorLockKeys;
+		}
+		LinkedHashSet<String> deduped = new LinkedHashSet<>();
+		for (String k : raw)
+		{
+			if (k == null)
+			{
+				continue;
+			}
+			String t = k.trim().toLowerCase(java.util.Locale.ENGLISH);
+			if (!t.isEmpty())
+			{
+				deduped.add(t);
+			}
+		}
+		cached = Collections.unmodifiableList(new ArrayList<>(deduped));
+		normalizedQuestColorLockKeys = cached;
+		return cached;
 	}
 
 	public int getSchemaVersionNumber()

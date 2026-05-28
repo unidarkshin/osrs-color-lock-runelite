@@ -79,6 +79,10 @@ public class ColorLockGroupSync
 	/** Fingerprint of hub potion/food/ammo toggles; -1 until first /state or /auth group payload. */
 	private volatile int lastGroupItemPolicyFingerprint = -1;
 	private volatile boolean groupItemPolicyDirty;
+	/** Client-detected in-progress quest keys (normalized). */
+	private volatile Set<String> localInProgressQuestKeys = Collections.emptySet();
+	/** {@code member.colorLock.inProgressQuests} from the last successful {@code GET /state}. */
+	private volatile Set<String> hubInProgressQuestKeys = Collections.emptySet();
 
 	private final Gson gson;
 	private final OkHttpClient httpClient;
@@ -216,6 +220,32 @@ public class ColorLockGroupSync
 	public boolean isResolvedOk()
 	{
 		return resolvedOk;
+	}
+
+	/** Updates client-side quest progress (normalized catalog keys). */
+	public void setLocalInProgressQuestKeys(Set<String> keys)
+	{
+		if (keys == null || keys.isEmpty())
+		{
+			localInProgressQuestKeys = Collections.emptySet();
+			return;
+		}
+		localInProgressQuestKeys = Collections.unmodifiableSet(new LinkedHashSet<>(keys));
+	}
+
+	/** Union of local detection and hub echo — used for {@code questColorLockKeys} enforcement. */
+	public Set<String> getEffectiveInProgressQuestKeys()
+	{
+		Set<String> local = localInProgressQuestKeys;
+		Set<String> hub = hubInProgressQuestKeys;
+		if (local.isEmpty() && hub.isEmpty())
+		{
+			return Collections.emptySet();
+		}
+		LinkedHashSet<String> merged = new LinkedHashSet<>();
+		merged.addAll(local);
+		merged.addAll(hub);
+		return Collections.unmodifiableSet(merged);
 	}
 
 	/**
@@ -491,19 +521,22 @@ public class ColorLockGroupSync
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Runnable onFinishClientThread)
 	{
-		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, null, null, null, onFinishClientThread);
+		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, null, null, null, null,
+			onFinishClientThread);
 	}
 
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats,
-		List<String> completedQuests, List<String> completedDiaries, Runnable onFinishClientThread)
+		List<String> completedQuests, List<String> inProgressQuests, List<String> completedDiaries,
+		Runnable onFinishClientThread)
 	{
 		executor.execute(() -> {
 			try
 			{
 				synchronized (sessionLock)
 				{
-					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled, stats, completedQuests, completedDiaries);
+					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled, stats,
+						completedQuests, inProgressQuests, completedDiaries);
 				}
 			}
 			finally
@@ -537,7 +570,8 @@ public class ColorLockGroupSync
 	}
 
 	private int patchMeBlocking(ColorLockConfig config, String runescapeName, boolean presenceOnline,
-		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats, List<String> completedQuests, List<String> completedDiaries)
+		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats, List<String> completedQuests,
+		List<String> inProgressQuests, List<String> completedDiaries)
 	{
 		boolean isSyncToggleEvent = syncToggleEnabled != null;
 		if (config == null)
@@ -588,8 +622,9 @@ public class ColorLockGroupSync
 		}
 		boolean hasStats = stats != null && !stats.isEmpty();
 		boolean hasQuests = completedQuests != null && !completedQuests.isEmpty();
+		boolean hasInProgress = inProgressQuests != null && !inProgressQuests.isEmpty();
 		boolean hasDiaries = completedDiaries != null && !completedDiaries.isEmpty();
-		if (hasStats || hasQuests || hasDiaries)
+		if (hasStats || hasQuests || hasInProgress || hasDiaries)
 		{
 			bodySb.append(",\"stats\":{");
 			boolean statsFieldWritten = false;
@@ -638,6 +673,24 @@ public class ColorLockGroupSync
 						bodySb.append(',');
 					}
 					bodySb.append('"').append(ColorLockAuthBodies.gsonEscape(completedQuests.get(qi))).append('"');
+				}
+				bodySb.append(']');
+				statsFieldWritten = true;
+			}
+			if (hasInProgress)
+			{
+				if (statsFieldWritten)
+				{
+					bodySb.append(',');
+				}
+				bodySb.append("\"inProgressQuests\":[");
+				for (int pi = 0; pi < inProgressQuests.size(); pi++)
+				{
+					if (pi > 0)
+					{
+						bodySb.append(',');
+					}
+					bodySb.append('"').append(ColorLockAuthBodies.gsonEscape(inProgressQuests.get(pi))).append('"');
 				}
 				bodySb.append(']');
 				statsFieldWritten = true;
@@ -884,6 +937,15 @@ public class ColorLockGroupSync
 		{
 			noteRev(member.pluginProfileRev);
 		}
+		if (member.colorLock != null && member.colorLock.inProgressQuests != null)
+		{
+			hubInProgressQuestKeys = PluginQuestKeys.normalizeHubKeys(member.colorLock.inProgressQuests);
+		}
+		else
+		{
+			hubInProgressQuestKeys = Collections.emptySet();
+		}
+
 		if (resolvedLock != null)
 		{
 			log.info("Hub assigned your color-lock to {} (slug + member code matched the hub).", resolvedLock.getKey());
@@ -1088,11 +1150,20 @@ public class ColorLockGroupSync
 		Boolean colorLockIncludeAmmunition;
 	}
 
+	static final class ColorLockDto
+	{
+		List<String> inProgressQuests;
+		List<String> completedQuests;
+	}
+
 	static final class MemberDto
 	{
 		String assignedColor;
 		String status;
 		Number pluginProfileRev;
+
+		@SerializedName("colorLock")
+		ColorLockDto colorLock;
 	}
 
 	static final class RosterRowDto

@@ -81,6 +81,20 @@ public class ManifestRulesTest
 	}
 
 	@Test
+	public void questInProgressExemptsWrongColor()
+	{
+		ManifestItem plagueJacket = GSON.fromJson(
+			"{\"id\":284,\"usableColors\":[\"yellow\",\"brown\"],\"colorLockApplies\":true,"
+				+ "\"questColorLockKeys\":[\"sheep_herder\"]}",
+			ManifestItem.class);
+		Set<String> inProgress = Collections.singleton("sheep_herder");
+		Assert.assertTrue(ManifestRules.questColorLockActiveExempt(plagueJacket, inProgress));
+		Assert.assertFalse(ManifestRules.isRestrictedForAssignment(plagueJacket, ColorLockColor.BLUE, null, inProgress));
+		Assert.assertTrue(ManifestRules.isRestrictedForAssignment(plagueJacket, ColorLockColor.BLUE, null,
+			Collections.emptySet()));
+	}
+
+	@Test
 	public void crewPaletteIntersectsManifest()
 	{
 		ManifestItem redYellow = GSON.fromJson(

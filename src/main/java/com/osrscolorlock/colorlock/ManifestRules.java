@@ -53,7 +53,29 @@ public final class ManifestRules
 
 	public static boolean isRestrictedForAssignment(ManifestItem row, ColorLockColor assignment)
 	{
-		return isRestrictedForAssignment(row, assignment, null);
+		return isRestrictedForAssignment(row, assignment, null, null);
+	}
+
+	/** True when any {@code questColorLockKeys} entry is in {@code inProgressQuestsLowercase}. */
+	public static boolean questColorLockActiveExempt(ManifestItem row, Set<String> inProgressQuestsLowercase)
+	{
+		if (row == null || inProgressQuestsLowercase == null || inProgressQuestsLowercase.isEmpty())
+		{
+			return false;
+		}
+		List<String> keys = row.getNormalizedQuestColorLockKeys();
+		if (keys.isEmpty())
+		{
+			return false;
+		}
+		for (String k : keys)
+		{
+			if (inProgressQuestsLowercase.contains(k))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -63,7 +85,17 @@ public final class ManifestRules
 	public static boolean isRestrictedForAssignment(ManifestItem row, ColorLockColor assignment,
 		Set<String> crewPaletteLowercase)
 	{
+		return isRestrictedForAssignment(row, assignment, crewPaletteLowercase, null);
+	}
+
+	public static boolean isRestrictedForAssignment(ManifestItem row, ColorLockColor assignment,
+		Set<String> crewPaletteLowercase, Set<String> inProgressQuestsLowercase)
+	{
 		if (!isLockEnforced(row))
+		{
+			return false;
+		}
+		if (questColorLockActiveExempt(row, inProgressQuestsLowercase))
 		{
 			return false;
 		}

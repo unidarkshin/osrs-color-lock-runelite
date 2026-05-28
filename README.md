@@ -36,6 +36,12 @@ The plugin does **not** send: bank contents, chat, location, hashes, IP, telemet
 
 Toggle **Sync with group** off to stop all network traffic except the public item rules pull.
 
+### Local cache (offline / manual mode)
+
+After the first successful items download each login, the plugin writes a copy of the rules JSON to
+`%USERPROFILE%\.runelite\color-lock-helper\items-manifest.json` (same folder RuneLite uses for cache, logs, and plugin data).
+If the hub is unreachable, enforcement falls back to that file. Credentials and assigned color still use normal RuneLite config (`ConfigManager`); only the item catalog is cached on disk.
+
 ## Increasing RuneLite memory (recommended if using many plugins)
 
 If RuneLite feels laggy or freezes with many plugins active, increase the client's heap size from the default 512 MB:

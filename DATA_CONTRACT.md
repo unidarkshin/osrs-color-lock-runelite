@@ -57,7 +57,8 @@ The plugin stores the JWT in memory only, with the wall-clock expiry, and re-aut
   "group":  { "slug": "...", "name": "...", "enabledColors": [...] },
   "member": { "assignedColor": "red", "status": "active", "pluginProfileRev": 7, "colorLocked": false, ... },
   "roster": [ ... ],
-  "items":  { "url": "https://.../api/v1/items?mode=color-lock&colored=1&groupFilters=1&...", "schemaVersion": 88, "note": "..." }
+  "items":  { "url": "https://.../api/v1/items?mode=color-lock&colored=1&groupFilters=1&fields=plugin&...", "schemaVersion": 91, "note": "..." },
+  "member": { "assignedColor": "red", "colorLock": { "inProgressQuests": ["sheep_herder"], "completedQuests": [] } }
 }
 ```
 
@@ -84,7 +85,7 @@ Request body (everything except `runescapeUsername` is optional):
 | `presence.online` | optional | `true` on heartbeats, `false` on shutdown / on the sync-off PATCH. |
 | `currentColor` | optional | The plugin's effective color (hub-assigned when synced, else the manual `assignedColor`). Audit-only — never changes `member.assignedColor`. |
 | `sync.enabled` | optional | Sent exactly once per checkbox toggle so the hub history can timestamp the event and snapshot `currentColor`. Omitted on regular heartbeats. |
-| `stats` | optional | Skill levels, current hitpoints, and current prayer sent on each heartbeat (added in v1.1). Contains `stats.skills` (all skill levels), `stats.hitpoints` (boosted HP), and `stats.prayer` (boosted prayer). |
+| `stats` | optional | Skill levels, current hitpoints, and current prayer sent on each heartbeat (added in v1.1). Contains `stats.skills` (all skill levels), `stats.hitpoints` (boosted HP), `stats.prayer` (boosted prayer), `stats.completedQuests`, `stats.inProgressQuests` (RuneLite display names; hub normalizes to catalog keys), and `stats.completedDiaries`. |
 
 Hub considers members stale after ~180 s without a heartbeat, so a 60 s cadence keeps presence stable across short network hiccups. Response carries `X-OCL-API-Contract-Version: 8` (`ColorLockApiContracts.EXPECTED_PLUGIN_ME_API_CONTRACT_VERSION`).
 
@@ -102,7 +103,8 @@ HTTP `GET` → **JSON array** of objects. Response headers `X-OCL-API-Contract-V
 | `red` … `white` | number | Percentages; informational |
 | **`usableColors`** | string[] | One or more of: `red`, `yellow`, `green`, `blue`, `purple`, `brown`, `black`, `white` |
 | **`colorLockApplies`** | bool | **`false`** = do not gate. **`true`** = gate (when `usableColors` present). |
-| **`schemaVersion`** | int | Current value: **88** — increment together with plugin (`ColorLockPlugin.EXPECTED_SCHEMA_VERSION`) |
+| **`questColorLockKeys`** | string[] | Quest catalog keys; while any key is in the member's in-progress set, plugin allows any team color for that item |
+| **`schemaVersion`** | int | Current value: **91** — increment together with plugin (`ColorLockPlugin.EXPECTED_SCHEMA_VERSION`) |
 
 Other fields (`stabAttack`, `tierLabel`, …) may be ignored.
 
@@ -111,3 +113,11 @@ Other fields (`stabAttack`, `tierLabel`, …) may be ignored.
 If `usableColors` is missing → treat manifest as stale; refuse to gate actions or bundle a pinned snapshot release.
 
 Bump `schemaVersion` in web app (`src/lib/colorLockItemsPayload.ts`) whenever you intentionally break consumers; update this doc and publish a matching plugin release.
+
+### Plugin disk cache
+
+On the **first successful network manifest fetch each login** (after potion reconcile), the plugin
+writes the in-memory catalog to `~/.runelite/color-lock-helper/items-manifest.json`
+(JSON: `schemaVersion`, `sourceUrl`, `items[]`). Periodic refreshes do not rewrite disk.
+On startup or when a network fetch fails, it restores from that file so **manual lock / sync-off**
+still enforces rules from the last hub fetch.

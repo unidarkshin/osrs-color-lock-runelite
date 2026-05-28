@@ -10,13 +10,13 @@ public final class ColorLockApiContracts
 	public static final String HEADER_ITEMS_SCHEMA = "X-OCL-Items-Schema-Version";
 
 	/** {@code GET /api/v1/items} handler contract (not per-row usability math). */
-	public static final int EXPECTED_ITEMS_API_CONTRACT_VERSION = 10;
+	public static final int EXPECTED_ITEMS_API_CONTRACT_VERSION = 11;
 
 	/** Per-row {@code usableColors} semantics in item payloads. */
-	public static final int EXPECTED_ITEMS_JSON_SCHEMA_VERSION = 88;
+	public static final int EXPECTED_ITEMS_JSON_SCHEMA_VERSION = 91;
 
 	/** {@code PATCH /api/plugin/v1/me} request/response shape. */
-	public static final int EXPECTED_PLUGIN_ME_API_CONTRACT_VERSION = 8;
+	public static final int EXPECTED_PLUGIN_ME_API_CONTRACT_VERSION = 13;
 
 	private ColorLockApiContracts()
 	{
