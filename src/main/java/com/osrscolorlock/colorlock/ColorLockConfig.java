@@ -78,7 +78,7 @@ public interface ColorLockConfig extends Config
 		position = 30,
 		keyName = "showColorOverlay",
 		name = "Mark restricted items",
-		description = "Draws a red corner mark on items in inventory, bank, and worn equipment that your color cannot use."
+		description = "Draws a red corner mark on items in inventory, bank, shops, and worn equipment that your color cannot use."
 	)
 	default boolean showColorOverlay()
 	{
@@ -89,7 +89,7 @@ public interface ColorLockConfig extends Config
 		position = 32,
 		keyName = "showColorSwatches",
 		name = "Color swatches on hover",
-		description = "Show which colors can use an item when you hover over it."
+		description = "Show which colors can use an item when you hover over it (inventory, bank, shops, equipment)."
 	)
 	default boolean showColorSwatches()
 	{

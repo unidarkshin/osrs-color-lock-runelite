@@ -51,7 +51,10 @@ public class ColorLockItemOverlay extends WidgetItemOverlay
 		showOnInventory();
 		showOnBank();
 		showOnEquipment();
-		showOnInterfaces(InterfaceID.GROUP_STORAGE, InterfaceID.GROUP_STORAGE_INVENTORY);
+		showOnInterfaces(
+			InterfaceID.GROUP_STORAGE,
+			InterfaceID.GROUP_STORAGE_INVENTORY,
+			InterfaceID.SHOP);
 	}
 
 	@Override
