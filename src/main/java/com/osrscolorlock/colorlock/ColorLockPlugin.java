@@ -10,8 +10,11 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -25,6 +28,7 @@ import com.google.inject.Provides;
 
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.Menu;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.events.BeforeMenuRender;
@@ -35,9 +39,11 @@ import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.ChatMessageType;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.Quest;
 import net.runelite.api.QuestState;
 import net.runelite.api.Skill;
+import net.runelite.api.VarPlayer;
 import net.runelite.api.Varbits;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatColorType;
@@ -54,6 +60,7 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.Text;
 @PluginDescriptor(
 	name = "Color Locked",
 	description = "Group Iron color-lock for the Color Lock hub. Sync team color and rules; block wrong-color "
@@ -89,6 +96,9 @@ public class ColorLockPlugin extends Plugin
 
 	/** Debounce quest scans after varbit changes (quests are var-driven). */
 	private static final long QUEST_PROGRESS_DEBOUNCE_MS = 2_000L;
+
+	/** Debounce collection-log PATCH after chat notification (varp may update same tick). */
+	private static final long COLLECTION_LOG_HUB_DEBOUNCE_MS = 1_000L;
 
 	/** Strip config keys we no longer expose so old profiles don't carry stale state. */
 	private void purgeDeprecatedConfigKeys()
@@ -158,6 +168,7 @@ public class ColorLockPlugin extends Plugin
 	private Provider<ColorLockLookupPanel> lookupPanelProvider;
 
 	private NavigationButton lookupNavButton;
+	private boolean lookupNavOnToolbar;
 
 	private static final long LOGIN_REFRESH_DEBOUNCE_MS = 10_000L;
 	private static final long SETTINGS_OPEN_RESYNC_DEBOUNCE_MS = 30_000L;
@@ -166,7 +177,13 @@ public class ColorLockPlugin extends Plugin
 	private ScheduledFuture<?> scheduledMeHeartbeat;
 	private ScheduledFuture<?> scheduledQuestHubSync;
 	private ScheduledFuture<?> scheduledQuestProgressCheck;
+	private ScheduledFuture<?> scheduledCollectionLogHubSync;
+	private volatile boolean pendingCollectionLogIsNewDrop;
+	private final ColorLockCollectionLogItemQueue collectionLogItemQueue = new ColorLockCollectionLogItemQueue();
+	private static final Pattern COLLECTION_LOG_NEW_ITEM_CHAT =
+		Pattern.compile("New item added to your collection log: (.+)");
 	private int lastQuestProgressFingerprint = Integer.MIN_VALUE;
+	private int lastCollectionLogUniquesSent = Integer.MIN_VALUE;
 	private volatile long lastDebouncedRefreshMs;
 	private volatile long lastSettingsOpenResyncMs;
 	private volatile boolean settingsPanelOpenLastTick;
@@ -193,19 +210,12 @@ public class ColorLockPlugin extends Plugin
 		migrateManualIncludeFoodConfig();
 		purgeDeprecatedConfigKeys();
 		overlayManager.add(itemOverlay);
-		lookupNavButton = NavigationButton.builder()
-			.tooltip("Color Locked lookup")
-			.icon(ColorLockLookupPanel.createNavIcon())
-			.priority(7)
-			.panel(lookupPanelProvider.get())
-			.build();
-		if (config.showLookupPanel())
-		{
-			clientToolbar.addNavigation(lookupNavButton);
-		}
+		SwingUtilities.invokeLater(this::installLookupSidebar);
 		kickoffFetch();
 		lastDebouncedRefreshMs = 0L;
 		lastQuestProgressFingerprint = Integer.MIN_VALUE;
+		lastCollectionLogUniquesSent = Integer.MIN_VALUE;
+		collectionLogItemQueue.clear();
 		schedulePeriodicManifestRefresh();
 		schedulePeriodicMeHeartbeat();
 		startSettingsMuteTimer();
@@ -213,6 +223,7 @@ public class ColorLockPlugin extends Plugin
 		{
 			manifestStore.notifyPlayerLoggedIn();
 			refreshQuestProgressIfChanged();
+			refreshCollectionLogHubSyncIfChanged();
 		}
 		if (config.hubGroupSyncEnabled() && hubCredentialsFilled(config)
 			&& client.getGameState() == GameState.LOGGED_IN)
@@ -242,9 +253,11 @@ public class ColorLockPlugin extends Plugin
 			}
 			lookupNavButton = null;
 		}
+		lookupNavOnToolbar = false;
 		cancelPeriodicManifestRefresh();
 		cancelPeriodicMeHeartbeat();
 		cancelQuestHubSync();
+		cancelCollectionLogHubSync();
 		cancelQuestProgressCheck();
 		stopSettingsMuteTimer();
 		sendPresenceOfflineBestEffort();
@@ -338,16 +351,7 @@ public class ColorLockPlugin extends Plugin
 		}
 		if ("showLookupPanel".equals(key))
 		{
-			SwingUtilities.invokeLater(() -> {
-				if (config.showLookupPanel())
-				{
-					clientToolbar.addNavigation(lookupNavButton);
-				}
-				else
-				{
-					try { clientToolbar.removeNavigation(lookupNavButton); } catch (RuntimeException ignored) { }
-				}
-			});
+			SwingUtilities.invokeLater(this::syncLookupSidebarVisibility);
 			return;
 		}
 		if (MANUAL_ITEM_FILTER_KEYS.contains(key))
@@ -385,7 +389,10 @@ public class ColorLockPlugin extends Plugin
 		manifestStore.notifyPlayerLoggedIn();
 		kickoffFetch();
 		lastQuestProgressFingerprint = Integer.MIN_VALUE;
+		lastCollectionLogUniquesSent = Integer.MIN_VALUE;
+		collectionLogItemQueue.clear();
 		refreshQuestProgressIfChanged();
+		refreshCollectionLogHubSyncIfChanged();
 		if (config.hubGroupSyncEnabled() && hubCredentialsFilled(config))
 		{
 			runLoginVerification();
@@ -438,12 +445,93 @@ public class ColorLockPlugin extends Plugin
 		stripOpenMenu();
 	}
 
+	private void installLookupSidebar()
+	{
+		if (lookupNavButton == null)
+		{
+			try
+			{
+				lookupNavButton = NavigationButton.builder()
+					.tooltip("Color Locked lookup")
+					.icon(ColorLockLookupPanel.createNavIcon())
+					.priority(7)
+					.panel(lookupPanelProvider.get())
+					.build();
+			}
+			catch (Throwable t)
+			{
+				log.error("Color Locked: failed to build lookup sidebar", t);
+				return;
+			}
+		}
+		syncLookupSidebarVisibility();
+	}
+
+	private void syncLookupSidebarVisibility()
+	{
+		if (lookupNavButton == null)
+		{
+			return;
+		}
+		if (config.showLookupPanel())
+		{
+			if (!lookupNavOnToolbar)
+			{
+				try
+				{
+					clientToolbar.addNavigation(lookupNavButton);
+					lookupNavOnToolbar = true;
+				}
+				catch (RuntimeException ex)
+				{
+					log.error("Color Locked: could not add sidebar button", ex);
+				}
+			}
+		}
+		else if (lookupNavOnToolbar)
+		{
+			try
+			{
+				clientToolbar.removeNavigation(lookupNavButton);
+				lookupNavOnToolbar = false;
+			}
+			catch (RuntimeException ex)
+			{
+				log.debug("removeNavigation failed", ex);
+			}
+		}
+	}
+
+	@Subscribe
+	public void onChatMessage(ChatMessage event)
+	{
+		if (event.getType() != ChatMessageType.GAMEMESSAGE)
+		{
+			return;
+		}
+		String message = event.getMessage();
+		if (message == null || message.isEmpty())
+		{
+			return;
+		}
+		Matcher matcher = COLLECTION_LOG_NEW_ITEM_CHAT.matcher(Text.removeTags(message));
+		if (matcher.find())
+		{
+			collectionLogItemQueue.offerFromChat(matcher.group(1));
+		}
+	}
+
 	@Subscribe
 	public void onVarbitChanged(VarbitChanged event)
 	{
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
 			return;
+		}
+		int varpId = event.getVarpId();
+		if (varpId == VarPlayer.CLOG_TOTAL || varpId == VarPlayer.CLOG_LOGGED)
+		{
+			scheduleCollectionLogHubSyncDebounced(true);
 		}
 		scheduleQuestProgressCheckDebounced();
 	}
@@ -620,6 +708,15 @@ public class ColorLockPlugin extends Plugin
 		}
 	}
 
+	private void cancelCollectionLogHubSync()
+	{
+		if (scheduledCollectionLogHubSync != null)
+		{
+			scheduledCollectionLogHubSync.cancel(false);
+			scheduledCollectionLogHubSync = null;
+		}
+	}
+
 	private void cancelQuestProgressCheck()
 	{
 		if (scheduledQuestProgressCheck != null)
@@ -669,7 +766,7 @@ public class ColorLockPlugin extends Plugin
 			List<String> inProgress = gatherInProgressQuestNames();
 			List<String> diaries = gatherCompletedDiaries();
 			groupSync.patchMeAsync(config, name, true, currentColorKey, toggle, stats, quests, inProgress, diaries,
-				this::pullStateAndMirrorColorOnHeartbeat);
+				null, gatherLocalWorldPoint(), this::pullStateAndMirrorColorOnHeartbeat);
 		});
 	}
 
@@ -699,13 +796,23 @@ public class ColorLockPlugin extends Plugin
 			done.run();
 			return;
 		}
-		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, null, null, null, null, done);
+		groupSync.patchMeAsync(config, name, false, currentEffectiveColorKey(), Boolean.FALSE, null, null, null, null,
+			null, null, done);
 	}
 
 	private String currentEffectiveColorKey()
 	{
 		ColorLockColor c = groupSync.effectiveAssignment(config);
 		return c == null ? null : c.getKey();
+	}
+
+	private WorldPoint gatherLocalWorldPoint()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
+		{
+			return null;
+		}
+		return client.getLocalPlayer().getWorldLocation();
 	}
 
 	private java.util.Map<String, Integer> gatherStats()
@@ -846,7 +953,105 @@ public class ColorLockPlugin extends Plugin
 			java.util.Map<String, Integer> stats = gatherStats();
 			List<String> inProgress = gatherInProgressQuestNames();
 			groupSync.patchMeAsync(config, name, true, currentEffectiveColorKey(), null, stats, null, inProgress, null,
-				this::pullStateAndMirrorColorOnHeartbeat);
+				null, gatherLocalWorldPoint(), this::pullStateAndMirrorColorOnHeartbeat);
+		});
+	}
+
+	private Integer gatherCollectionLogUniques()
+	{
+		return ColorLockCollectionLog.readUniqueObtainedCount(client);
+	}
+
+	private void refreshCollectionLogHubSyncIfChanged()
+	{
+		if (!config.hubGroupSyncEnabled() || !hubCredentialsFilled(config) || !groupSync.isResolvedOk())
+		{
+			return;
+		}
+		Integer count = gatherCollectionLogUniques();
+		if (count == null || count == lastCollectionLogUniquesSent)
+		{
+			return;
+		}
+		scheduleCollectionLogHubSyncDebounced(false);
+	}
+
+	private void scheduleCollectionLogHubSyncDebounced(boolean newDropEvent)
+	{
+		if (!config.hubGroupSyncEnabled() || !groupSync.isResolvedOk())
+		{
+			return;
+		}
+		pendingCollectionLogIsNewDrop = newDropEvent;
+		if (scheduledCollectionLogHubSync != null)
+		{
+			scheduledCollectionLogHubSync.cancel(false);
+		}
+		scheduledCollectionLogHubSync = scheduledExecutor.schedule(this::fireCollectionLogHubSync,
+			COLLECTION_LOG_HUB_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+	}
+
+	private void fireCollectionLogHubSync()
+	{
+		final boolean newDrop = pendingCollectionLogIsNewDrop;
+		clientThread.invokeLater(() -> {
+			if (client.getGameState() != GameState.LOGGED_IN)
+			{
+				return;
+			}
+			String name = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
+			if (name == null || name.isBlank())
+			{
+				return;
+			}
+			Integer collectionLogUniques = gatherCollectionLogUniques();
+			if (collectionLogUniques == null)
+			{
+				return;
+			}
+			int prev = lastCollectionLogUniquesSent;
+			if (!newDrop)
+			{
+				if (collectionLogUniques == prev)
+				{
+					return;
+				}
+				lastCollectionLogUniquesSent = collectionLogUniques;
+				groupSync.patchMeAsync(config, name, true, currentEffectiveColorKey(), null, null, null, null, null,
+					ColorLockCollectionLogPatch.snapshot(collectionLogUniques),
+					gatherLocalWorldPoint(), this::pullStateAndMirrorColorOnHeartbeat);
+				return;
+			}
+			if (prev == Integer.MIN_VALUE)
+			{
+				// Drop fired before login snapshot debounce; treat as a single new unique at current total.
+				String collectionItem = collectionLogItemQueue.pollForDrop();
+				lastCollectionLogUniquesSent = collectionLogUniques;
+				groupSync.patchMeAsync(config, name, true, currentEffectiveColorKey(), null, null, null, null, null,
+					ColorLockCollectionLogPatch.newDrop(collectionLogUniques, collectionItem),
+					gatherLocalWorldPoint(), this::pullStateAndMirrorColorOnHeartbeat);
+				return;
+			}
+			int delta = collectionLogUniques - prev;
+			if (delta <= 0)
+			{
+				return;
+			}
+			if (delta > 1 && collectionLogItemQueue.size() < delta)
+			{
+				log.debug("Collection log +{} with {} queued chat label(s) — extra drops may have null collectionItem.",
+					delta, collectionLogItemQueue.size());
+			}
+			List<ColorLockCollectionLogPatch> drops = new ArrayList<>(delta);
+			for (int i = 0; i < delta; i++)
+			{
+				int totalAfterDrop = prev + 1 + i;
+				String collectionItem = collectionLogItemQueue.pollForDrop();
+				drops.add(ColorLockCollectionLogPatch.newDrop(totalAfterDrop, collectionItem));
+			}
+			lastCollectionLogUniquesSent = collectionLogUniques;
+			groupSync.patchMeCollectionLogDropsAsync(config, name, true, currentEffectiveColorKey(), drops,
+				gatherLocalWorldPoint(), this::pullStateAndMirrorColorOnHeartbeat);
 		});
 	}
 
@@ -920,6 +1125,10 @@ public class ColorLockPlugin extends Plugin
 			if (groupSync.consumeGroupItemPolicyDirty())
 			{
 				reloadManifestAfterHubItemPolicyChange();
+			}
+			for (String notice : groupSync.consumeUnshownEquipmentNoticeMessages())
+			{
+				postChatBanner("Color Locked: " + notice);
 			}
 		});
 	}

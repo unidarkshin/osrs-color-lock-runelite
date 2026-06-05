@@ -73,7 +73,7 @@ Request body (everything except `runescapeUsername` is optional):
 ```json
 {
   "runescapeUsername": "Zezima",
-  "presence": { "online": true },
+  "presence": { "online": true, "worldX": 3200, "worldY": 3200, "plane": 0 },
   "currentColor": "red",
   "sync": { "enabled": true }
 }
@@ -83,11 +83,13 @@ Request body (everything except `runescapeUsername` is optional):
 |-------|----------|-------|
 | `runescapeUsername` | yes | Pulled from `client.getLocalPlayer().getName()`. Validated client-side: 1–12 chars, `^[A-Za-z0-9 _-]+$`. Heartbeat is skipped when missing or invalid. |
 | `presence.online` | optional | `true` on heartbeats, `false` on shutdown / on the sync-off PATCH. |
+| `presence.worldX` / `worldY` / `plane` | optional | World tile on heartbeat (all three together). Plugin sends now; hub storage / use is **not implemented yet**. |
 | `currentColor` | optional | The plugin's effective color (hub-assigned when synced, else the manual `assignedColor`). Audit-only — never changes `member.assignedColor`. |
 | `sync.enabled` | optional | Sent exactly once per checkbox toggle so the hub history can timestamp the event and snapshot `currentColor`. Omitted on regular heartbeats. |
-| `stats` | optional | Skill levels, current hitpoints, and current prayer sent on each heartbeat (added in v1.1). Contains `stats.skills` (all skill levels), `stats.hitpoints` (boosted HP), `stats.prayer` (boosted prayer), `stats.completedQuests`, `stats.inProgressQuests` (RuneLite display names; hub normalizes to catalog keys), and `stats.completedDiaries`. |
+| `stats` | optional | Skill levels, current hitpoints, and current prayer (v1.1). `stats.skills`, `stats.hitpoints`, `stats.prayer`, `stats.completedQuests`, `stats.inProgressQuests`, `stats.completedDiaries`. Does **not** include collection-log count. |
+| `collectionLog` | optional | One object on `PATCH /me`. **Login / snapshot:** `{ "totalCount": number }` only. **New drop:** `totalCount`, `"newDrop": true`, optional `collectionItem`. Plugin does **not** send nearby names (hub will derive from stored XY later). Multiple uniques → one PATCH per drop (sequential). **Hub handler TBD.** |
 
-Hub considers members stale after ~180 s without a heartbeat, so a 60 s cadence keeps presence stable across short network hiccups. Response carries `X-OCL-API-Contract-Version: 8` (`ColorLockApiContracts.EXPECTED_PLUGIN_ME_API_CONTRACT_VERSION`).
+Hub considers members stale after ~180 s without a heartbeat, so a 60 s cadence keeps presence stable across short network hiccups. Response carries `X-OCL-API-Contract-Version: 13` (`ColorLockApiContracts.EXPECTED_PLUGIN_ME_API_CONTRACT_VERSION`) until the hub adds the new fields.
 
 ## Items manifest
 

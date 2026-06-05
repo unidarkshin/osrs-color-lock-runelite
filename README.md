@@ -28,7 +28,7 @@ Color Locked talks to **one host:** `group.thegrandchart.com`. Nothing is sent a
 |---------|------|-----|
 | `POST /api/plugin/v1/auth` | Group code, Member code, optional Group password | Trade for a short-lived Bearer JWT. |
 | `GET  /api/plugin/v1/state` | Bearer JWT | Read your assigned color and group palette. |
-| `PATCH /api/plugin/v1/me` (~every 60 s while logged in) | Bearer JWT, your in-game display name, `presence.online`, `currentColor`, skill levels, current HP and prayer; also `sync.enabled` when you toggle the checkbox | Heartbeat for online status, skill tracking, and desync audit. |
+| `PATCH /api/plugin/v1/me` (~every 60 s while logged in) | Bearer JWT, your in-game display name, `presence.online` (+ world tile), `currentColor`, skill levels, current HP and prayer; also `sync.enabled` when you toggle the checkbox | Heartbeat for online status and skill tracking. `collectionLog` snapshot on login; on a new clog drop, `totalCount`, `newDrop`, and optional `collectionItem` (one PATCH per unique). |
 | `GET  {state.items.url}`, `GET /api/v1/items?colored=1&groupFilters=1&…`, or deprecated `GET /api/items?…` (last retry) | Bearer JWT when synced | Filtered item rules JSON (group potion/food/ammo policy). |
 | `POST /api/plugin/v1/resolve/{slug}` | Group code + Member code + Group password when needed | Fallback when `POST …/auth` returns HTTP 404 before JWT `/auth` is fully deployed server-side. |
 

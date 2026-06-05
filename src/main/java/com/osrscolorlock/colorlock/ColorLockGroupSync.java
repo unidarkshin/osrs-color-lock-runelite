@@ -10,6 +10,8 @@ import java.util.concurrent.ScheduledExecutorService;
 
 import net.runelite.client.callback.ClientThread;
 
+import net.runelite.api.coords.WorldPoint;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -83,6 +85,8 @@ public class ColorLockGroupSync
 	private volatile Set<String> localInProgressQuestKeys = Collections.emptySet();
 	/** {@code member.colorLock.inProgressQuests} from the last successful {@code GET /state}. */
 	private volatile Set<String> hubInProgressQuestKeys = Collections.emptySet();
+	private volatile List<PluginEquipmentNoticeDto> equipmentNoticesFromState = Collections.emptyList();
+	private final Set<String> shownEquipmentNoticeIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
 	private final Gson gson;
 	private final OkHttpClient httpClient;
@@ -182,6 +186,43 @@ public class ColorLockGroupSync
 	public List<RosterMemberSnapshot> getRosterSnapshot()
 	{
 		return rosterSnapshot;
+	}
+
+	/** Chat messages from hub equipment rolls not shown yet (e.g. collection log). */
+	List<String> consumeUnshownEquipmentNoticeMessages()
+	{
+		List<PluginEquipmentNoticeDto> notices = equipmentNoticesFromState;
+		if (notices == null || notices.isEmpty())
+		{
+			return Collections.emptyList();
+		}
+		List<String> out = new ArrayList<>();
+		for (PluginEquipmentNoticeDto n : notices)
+		{
+			if (n == null || n.id == null || n.id.isBlank())
+			{
+				continue;
+			}
+			if (!shownEquipmentNoticeIds.add(n.id))
+			{
+				continue;
+			}
+			if (n.message != null && !n.message.isBlank())
+			{
+				out.add(n.message.trim());
+			}
+		}
+		return out;
+	}
+
+	private void ingestEquipmentNoticesFromState(MemberDto member)
+	{
+		if (member == null || member.pluginEquipmentNotices == null || member.pluginEquipmentNotices.isEmpty())
+		{
+			equipmentNoticesFromState = Collections.emptyList();
+			return;
+		}
+		equipmentNoticesFromState = Collections.unmodifiableList(new ArrayList<>(member.pluginEquipmentNotices));
 	}
 
 	/** Last group meta (slug, name, enabledColors). Null when never authed. */
@@ -521,14 +562,14 @@ public class ColorLockGroupSync
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Runnable onFinishClientThread)
 	{
-		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, null, null, null, null,
-			onFinishClientThread);
+		patchMeAsync(config, runescapeName, presenceOnline, currentColorKey, null, null, null, null, null, null,
+			null, onFinishClientThread);
 	}
 
 	void patchMeAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats,
 		List<String> completedQuests, List<String> inProgressQuests, List<String> completedDiaries,
-		Runnable onFinishClientThread)
+		ColorLockCollectionLogPatch collectionLog, WorldPoint worldLocation, Runnable onFinishClientThread)
 	{
 		executor.execute(() -> {
 			try
@@ -536,7 +577,48 @@ public class ColorLockGroupSync
 				synchronized (sessionLock)
 				{
 					patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, syncToggleEnabled, stats,
-						completedQuests, inProgressQuests, completedDiaries);
+						completedQuests, inProgressQuests, completedDiaries, collectionLog, worldLocation);
+				}
+			}
+			finally
+			{
+				clientThread.invokeLater(() -> {
+					if (onFinishClientThread != null)
+					{
+						onFinishClientThread.run();
+					}
+				});
+			}
+		});
+	}
+
+	/** One PATCH per drop, in order (hub rolls and totals stay consistent). */
+	void patchMeCollectionLogDropsAsync(ColorLockConfig config, String runescapeName, boolean presenceOnline,
+		String currentColorKey, java.util.List<ColorLockCollectionLogPatch> drops, WorldPoint worldLocation,
+		Runnable onFinishClientThread)
+	{
+		if (drops == null || drops.isEmpty())
+		{
+			if (onFinishClientThread != null)
+			{
+				clientThread.invokeLater(onFinishClientThread);
+			}
+			return;
+		}
+		executor.execute(() -> {
+			try
+			{
+				synchronized (sessionLock)
+				{
+					for (ColorLockCollectionLogPatch drop : drops)
+					{
+						if (drop == null)
+						{
+							continue;
+						}
+						patchMeBlocking(config, runescapeName, presenceOnline, currentColorKey, null, null, null, null,
+							null, drop, worldLocation);
+					}
 				}
 			}
 			finally
@@ -571,7 +653,8 @@ public class ColorLockGroupSync
 
 	private int patchMeBlocking(ColorLockConfig config, String runescapeName, boolean presenceOnline,
 		String currentColorKey, Boolean syncToggleEnabled, Map<String, Integer> stats, List<String> completedQuests,
-		List<String> inProgressQuests, List<String> completedDiaries)
+		List<String> inProgressQuests, List<String> completedDiaries, ColorLockCollectionLogPatch collectionLog,
+		WorldPoint worldLocation)
 	{
 		boolean isSyncToggleEvent = syncToggleEnabled != null;
 		if (config == null)
@@ -610,7 +693,14 @@ public class ColorLockGroupSync
 		String uri = ColorLockSites.concatBasePath(base, ColorLockWeb.API_PLUGIN_ME);
 		StringBuilder bodySb = new StringBuilder(256)
 			.append("{\"runescapeUsername\":\"").append(ColorLockAuthBodies.gsonEscape(clean))
-			.append("\",\"presence\":{\"online\":").append(presenceOnline).append("}");
+			.append("\",\"presence\":{\"online\":").append(presenceOnline);
+		if (presenceOnline && worldLocation != null)
+		{
+			bodySb.append(",\"worldX\":").append(worldLocation.getX())
+				.append(",\"worldY\":").append(worldLocation.getY())
+				.append(",\"plane\":").append(worldLocation.getPlane());
+		}
+		bodySb.append('}');
 		if (currentColorKey != null && !currentColorKey.isBlank())
 		{
 			String cur = currentColorKey.trim().toLowerCase(Locale.ENGLISH);
@@ -624,6 +714,7 @@ public class ColorLockGroupSync
 		boolean hasQuests = completedQuests != null && !completedQuests.isEmpty();
 		boolean hasInProgress = inProgressQuests != null && !inProgressQuests.isEmpty();
 		boolean hasDiaries = completedDiaries != null && !completedDiaries.isEmpty();
+		boolean hasCollectionLog = collectionLog != null;
 		if (hasStats || hasQuests || hasInProgress || hasDiaries)
 		{
 			bodySb.append(",\"stats\":{");
@@ -711,6 +802,22 @@ public class ColorLockGroupSync
 					bodySb.append('"').append(ColorLockAuthBodies.gsonEscape(completedDiaries.get(di))).append('"');
 				}
 				bodySb.append(']');
+				statsFieldWritten = true;
+			}
+			bodySb.append('}');
+		}
+		if (hasCollectionLog)
+		{
+			bodySb.append(",\"collectionLog\":{\"totalCount\":").append(collectionLog.totalCount);
+			if (collectionLog.isNewDropEvent())
+			{
+				bodySb.append(",\"newDrop\":true");
+				if (collectionLog.collectionItem != null)
+				{
+					bodySb.append(",\"collectionItem\":\"")
+						.append(ColorLockAuthBodies.gsonEscape(collectionLog.collectionItem))
+						.append('"');
+				}
 			}
 			bodySb.append('}');
 		}
@@ -862,6 +969,7 @@ public class ColorLockGroupSync
 			String itemsUrl = state.items != null && state.items.url != null ? state.items.url.trim() : null;
 			hubItemsSchemaVersionHint = state.items != null ? state.items.schemaVersion : null;
 			applyGroupAndMember(state.group, state.member, normalizeItemsUrl(itemsUrl, base));
+			ingestEquipmentNoticesFromState(state.member);
 			captureRosterAndGroupSnapshot(state);
 			lastStateAtMs = System.currentTimeMillis();
 			return 200;
@@ -1161,9 +1269,20 @@ public class ColorLockGroupSync
 		String assignedColor;
 		String status;
 		Number pluginProfileRev;
+		Number equipmentPoints;
+		List<PluginEquipmentNoticeDto> pluginEquipmentNotices;
 
 		@SerializedName("colorLock")
 		ColorLockDto colorLock;
+	}
+
+	static final class PluginEquipmentNoticeDto
+	{
+		String id;
+		String at;
+		String kind;
+		Boolean awarded;
+		String message;
 	}
 
 	static final class RosterRowDto

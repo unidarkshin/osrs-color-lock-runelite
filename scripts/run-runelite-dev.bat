@@ -134,11 +134,24 @@ if not exist "%USERPROFILE%\.runelite\credentials.properties" (
 
 
 
+set CLIENT_JAR=%REPO2%\client-1.12.27.jar
+if not exist "%CLIENT_JAR%" (
+  for /f "delims=" %%J in ('dir /b /o-d "%REPO2%\client-*.jar" 2^>nul') do (
+    if not defined CLIENT_JAR set CLIENT_JAR=%REPO2%\%%J
+  )
+)
+if not exist "%CLIENT_JAR%" (
+  echo Missing client-*.jar in %REPO2% — open normal RuneLite once.
+  pause
+  exit /b 1
+)
+
 echo Starting CLIENT directly ^(developer-mode ON^); sideload: %SIDELOAD%
-
+echo Client API jar: %CLIENT_JAR%
 echo Max heap: %RUNELITE_DEV_XMX% ^(set RUNELITE_DEV_XMX=4096m to raise^)
+echo TIP: disable hub plugin "Color Locked" while sideloading — only one copy.
 
-REM No -Drunelite.launcher.version so sideload runs.
+REM Pin one client-*.jar first so 1.12.27 and 1.12.28 are not both on the classpath.
 
-"%RL_JAVA%" -ea -XX:+DisableAttachMechanism -Xmx%RUNELITE_DEV_XMX% -Xss2m -cp "%REPO2%\*" net.runelite.client.RuneLite --developer-mode %*
+"%RL_JAVA%" -ea -XX:+DisableAttachMechanism -Xmx%RUNELITE_DEV_XMX% -Xss2m -cp "%CLIENT_JAR%;%REPO2%\*" net.runelite.client.RuneLite --developer-mode %*
 
